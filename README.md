@@ -22,3 +22,11 @@ APITrace.py
 ```
 InstaOSNIT.py
 ```
+
+Updating:
+
+```
+
+cd InstaOSNIT && git stash && git pull && git stash pop
+
+```
