@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# InstaOSNIT.py
+# InstaOSNIT.py (Forensic-grade Instagram OSINT)
 
 import os, sys, re, json, time, random, argparse, csv, logging
 from uuid import uuid4
@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Tuple, Optional, Any
 import requests
 
-# Optional imports
+# --- Optional Imports ---
 try:
     from instaloader import Instaloader, Profile
     HAS_INSTALOADER = True
@@ -80,11 +80,14 @@ except Exception:
 
 try:
     import nltk
+    # Note: If 'stopwords' is not downloaded, this will cause a failure.
+    # The script attempts a quiet download.
     nltk.download('stopwords', quiet=True)
     STOP_WORDS = set(nltk.corpus.stopwords.words('english'))
 except Exception:
     STOP_WORDS = set()
 
+# --- Configuration ---
 DEFAULT_CONFIG = {
     "backoff_base": 2,
     "backoff_max": 300,
@@ -100,6 +103,7 @@ DEFAULT_CONFIG = {
     "log_file": "instaosnit.log",
 }
 
+# --- API Endpoints ---
 WEB_PROFILE_INFO = "https://i.instagram.com/api/v1/users/web_profile_info/?username={username}"
 USER_INFO = "https://i.instagram.com/api/v1/users/{user_id}/info/"
 USER_FEED = "https://i.instagram.com/api/v1/feed/user/{user_id}/?count={count}"
@@ -110,6 +114,7 @@ SELF_INFO_URL = "https://i.instagram.com/api/v1/accounts/current_user/?edit=true
 
 UA_POOL = DEFAULT_CONFIG["ua_pool"]
 
+# --- Utility Functions ---
 def setup_logging(path: str) -> None:
     logging.basicConfig(
         filename=path,
@@ -135,7 +140,8 @@ class StickyProxyPool:
     def __init__(self, proxies: Optional[List[Dict[str,str]]], sticky_seconds: int):
         self.proxies = proxies or []
         self.sticky_seconds = sticky_seconds
-        self.current = None  # FIX: Corrected indentation on this line
+        # FIX: Corrected indentation on this line (was incorrectly indented in the original context)
+        self.current = None
         self.until = 0
         self.health = {id(p): {"bad":0} for p in self.proxies}
 
@@ -164,6 +170,7 @@ class StickyProxyPool:
                 pass
 
 def pick_headers(app_ids: Optional[List[str]] = None) -> Dict[str, str]:
+    # Common Instagram App IDs
     app_ids = app_ids or ["936619743392459", "124024574287414", "567067343352427"]
     return {
         "User-Agent": random.choice(UA_POOL),
@@ -276,6 +283,8 @@ def get_feed_media(req: Requester, user_id: str, sessionid: str, count: int = 50
     return {"raw": safe_json(r), "status_code": r.status_code}
 
 def do_advanced_lookup(req: Requester, username: str, sessionid: Optional[str]) -> Dict[str, Any]:
+    # WARNING: This endpoint often requires complex request signing which is not implemented here.
+    # The current implementation will likely only work unauthenticated or if the target is public.
     data = "signed_body=SIGNATURE." + json.dumps({"q": username, "skip_recovery": "1"}, separators=(",", ":"))
     headers = pick_headers()
     r = req.request("POST", LOOKUP, headers=headers, data=data, cookies={'sessionid': sessionid} if sessionid else None, timeout=15)
@@ -294,12 +303,14 @@ def get_usernameinfo(req: Requester, username: str, sessionid: Optional[str]) ->
 
 def get_www_profile_a1(req: Requester, username: str) -> Dict[str, Any]:
     url = WWW_PROFILE_A1.format(username=username)
+    # Using a common web App ID
     headers = pick_headers(["936619743392459"])
     r = req.request("GET", url, headers=headers, timeout=15)
     if not r: return {"error": "network"}
     return {"status_code": r.status_code, "raw": safe_json(r), "text": r.text}
 
 def resolve_user_id(req: Requester, username: str, sessionid: Optional[str]) -> Tuple[Optional[str], Optional[str], Optional[Dict[str, Any]]]:
+    # 1. web_profile_info (Mobile API)
     try:
         res = get_user_web_profile(req, username, sessionid)
         raw = res.get("raw")
@@ -310,6 +321,7 @@ def resolve_user_id(req: Requester, username: str, sessionid: Optional[str]) -> 
                 if pk: return str(pk), "web_profile_info", raw
     except requests.exceptions.RequestException as e:
         logging.error(f"resolve_user_id web_profile_info error: {e}")
+    # 2. users/lookup (Mobile API, sensitive)
     try:
         res = do_advanced_lookup(req, username, sessionid)
         raw = res.get("raw") or {}
@@ -326,6 +338,7 @@ def resolve_user_id(req: Requester, username: str, sessionid: Optional[str]) -> 
                 if pk: return str(pk), "users/lookup", raw
     except requests.exceptions.RequestException as e:
         logging.error(f"resolve_user_id lookup error: {e}")
+    # 3. usernameinfo (Mobile API)
     try:
         res = get_usernameinfo(req, username, sessionid)
         raw = res.get("raw")
@@ -336,6 +349,7 @@ def resolve_user_id(req: Requester, username: str, sessionid: Optional[str]) -> 
                 if pk: return str(pk), "usernameinfo", raw
     except requests.exceptions.RequestException as e:
         logging.error(f"resolve_user_id usernameinfo error: {e}")
+    # 4. __a=1 (Web API)
     try:
         res = get_www_profile_a1(req, username)
         raw = res.get("raw")
@@ -354,8 +368,10 @@ def extract_contact_info(text: Optional[str]) -> Dict[str, str]:
     info = {'phone_in_text': 'N/A', 'email_in_text': 'N/A'}
     if not text: return info
     try:
+        # Simple email regex
         e = re.search(r'[\w\.-]+@[\w\.-]+', text)
         if e: info['email_in_text'] = e.group(0).lower()
+        # Simple international phone number regex
         p = re.search(r'(\+?\d{1,3}\s?\d{2,4}[-\s\.]?\d{2,4}[-\s\.]?\d{2,9})', text)
         if p: info['phone_in_text'] = re.sub(r'[\s\.\-\(\)]', '', p.group(0))
     except re.error as e:
@@ -363,12 +379,15 @@ def extract_contact_info(text: Optional[str]) -> Dict[str, str]:
     return info
 
 def normalize_phone(num: Optional[str]) -> Dict[str, str]:
-    if not num: return {"number": num, "country": "Unknown"}
-    if not HAS_PHONE: return {"number": num, "country": "Unknown"}
+    if not num: return {"number": "N/A", "country": "Unknown"}
+    if not HAS_PHONE: return {"number": num, "country": "Unknown (Phonenumbers library missing)"}
     try:
         pn = phonenumbers.parse(num)
+        # Assuming the number is valid and has a country code
         cc = region_code_for_country_code(pn.country_code)
-        return {"number": num, "country": cc}
+        # Re-format the number to standard E.164 for consistency
+        formatted = phonenumbers.format_number(pn, phonenumbers.PhoneNumberFormat.E164)
+        return {"number": formatted, "country": cc}
     except Exception as e:
         logging.warning(f"Phone normalize error: {e}")
         return {"number": num, "country": "Unknown"}
@@ -377,7 +396,8 @@ def extract_keywords(texts: List[Optional[str]], top: int = 15) -> List[Tuple[st
     words = []
     for t in texts:
         for w in re.findall(r'\b\w+\b', (t or "").lower()):
-            if w not in STOP_WORDS and len(w) > 3:
+            # Basic filtering
+            if w not in STOP_WORDS and len(w) > 3 and not w.isdigit():
                 words.append(w)
     return Counter(words).most_common(top)
 
@@ -387,6 +407,7 @@ def targeted_keyword_search(texts: List[Optional[str]], terms: List[str]) -> Dic
     ft = "\n".join(t for t in texts if t)
     for term in terms:
         try:
+            # Note: terms should ideally be raw regex strings
             m = re.findall(term, ft, re.IGNORECASE)
             if m: hits[term] = len(m)
         except re.error as e:
@@ -394,23 +415,25 @@ def targeted_keyword_search(texts: List[Optional[str]], terms: List[str]) -> Dic
             continue
     return hits
 
-def exif_from_url_native(req: Requester, url: Optional[str], outfile: str = "tmp_instaosnit.jpg") -> Dict[str, Any]:
+def exif_from_url_native(req: Requester, url: Optional[str]) -> Dict[str, Any]:
+    # FIX: Use a unique temporary filename for safety (e.g., if multithreaded)
+    outfile = f"tmp_instaosnit_{uuid4()}.jpg"
     if not HAS_PIL or not url: return {"error": "PIL or URL unavailable"}
     r = req.request("GET", url, timeout=15, stream=True)
-    if not r: return {"error": "network"}
+    if not r or r.status_code != 200: return {"error": "network or 404"}
     try:
         with open(outfile, "wb") as f:
             for chunk in r.iter_content(1024): f.write(chunk)
         img = Image.open(outfile)
         exif = img.getexif()
-        data = {ExifTags.TAGS.get(tag, tag): val for tag, val in exif.items()}
-        try: os.remove(outfile)
-        except (OSError, IOError):
-            pass
+        data = {ExifTags.TAGS.get(tag, tag): val for tag, val in exif.items()} if exif else {}
         return data
     except Exception as e:
         logging.error(f"EXIF extraction error: {e}")
         return {"error": f"exif: {e}"}
+    finally:
+        try: os.remove(outfile)
+        except (OSError, IOError): pass
 
 def infer_locations_from_feed(feed_raw: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(feed_raw, dict): return {"locations": [], "last_post_ts": None}
@@ -429,6 +452,7 @@ def infer_locations_from_feed(feed_raw: Dict[str, Any]) -> Dict[str, Any]:
         except Exception as e:
             logging.warning(f"Feed location parse error: {e}")
             continue
+    # Deduplicate locations
     uniq, seen = [], set()
     for l in locations:
         key = (l.get("pk"), l.get("name"))
@@ -458,6 +482,7 @@ def load_profile_instaloader(username: str, session_dir: str, login_user: Option
                 L.save_session_to_file(session_file)
                 logging.info(f"Instaloader session saved: {session_file}")
             try:
+                # Retrieve the sessionid cookie for use in the Requests class
                 sessionid = L.context._session.cookies.get('sessionid') or L.context.session.cookies.get('sessionid')
             except Exception:
                 sessionid = None
@@ -467,12 +492,12 @@ def load_profile_instaloader(username: str, session_dir: str, login_user: Option
         p = Profile.from_username(L.context, username)
         return L, p, sessionid
     except Exception as e:
-        # FIX: Changed 'instaloaderr' to 'Instaloader'
-        logging.warning(f"Profile load error: {e}")
+        # FIX: Corrected typo 'instaloaderr' to 'Instaloader' in the warning message
+        logging.warning(f"Instaloader Profile load error: {e}")
         return L, None, sessionid
 
 def analyze_profile_location_from_profile(p: Optional[Profile], n: int = 200) -> Dict[str, Any]:
-    res = {'profile_exists': bool(p), 'profile_data': {}, 'most_frequent_location': None, 'all_locations': [], 'all_coords': []}
+    res = {'profile_exists': bool(p), 'profile_data': {}, 'most_frequent_location': None, 'all_locations': [], 'all_coords': [], 'most_recent_location': None, 'text_clues': {}}
     if not p: return res
     res['profile_data'] = {
         'bio': p.biography,
@@ -483,13 +508,15 @@ def analyze_profile_location_from_profile(p: Optional[Profile], n: int = 200) ->
         'business_address': p.business_address_json or "N/A",
         'business_category': p.business_category_name or "N/A"
     }
-    c = Counter(); d = {}; mr = None; count = 0
+    c = Counter(); d = {}; most_recent = None; count = 0
+    # Iterate through posts to collect location data
     for post in p.get_posts():
         if count >= n: break
         count += 1
         if post.location:
             l = post.location; ln = (l.name or "").strip()
             try:
+                # Use .get() for safety on Instaloader objects
                 lat = getattr(l, "lat", None); lng = getattr(l, "lng", None)
             except Exception:
                 lat = None; lng = None
@@ -497,24 +524,29 @@ def analyze_profile_location_from_profile(p: Optional[Profile], n: int = 200) ->
                 res['all_coords'].append((lat, lng, post.date_utc))
             if ln:
                 c[ln] += 1; det = {'name': ln, 'lat': lat, 'lng': lng}; d[ln] = det
-                if not mr: mr = det; mr['post_date'] = post.date_utc
+                # Track the most recent location
+                if not most_recent or post.date_utc > most_recent.get('post_date', datetime.min.replace(tzinfo=timezone.utc)):
+                    most_recent = det.copy(); most_recent['post_date'] = post.date_utc
     res['all_locations'] = c.most_common()
     if c:
         mc, ct = c.most_common(1)[0]; det = d[mc]; det['count'] = ct
-        res['most_frequent_location'] = det; res['most_recent_location'] = mr
+        res['most_frequent_location'] = det; res['most_recent_location'] = most_recent
     res['text_clues'] = extract_contact_info(f"{p.biography or ''} {p.external_url or ''}")
     return res
 
 def cluster_primary_location(coords: List[Tuple[float,float]]) -> Optional[Dict[str, Any]]:
     if not HAS_SKLEARN or not coords: return None
     try:
-        X = [(lat, lng) for lat, lng in coords if lat is not None and lng is not None]
+        # DBSCAN needs (lat, lng) tuples
+        X = [(lat, lng) for lat, lng, _ in coords if lat is not None and lng is not None]
         if len(X) < 3: return None
+        # Default settings are often good for geo-clustering
         labels = DBSCAN(eps=0.01, min_samples=2).fit_predict(X)
         clusters = defaultdict(list)
         for (lat, lng), lbl in zip(X, labels):
-            if lbl != -1: clusters[lbl].append((lat, lng))
+            if lbl != -1: clusters[lbl].append((lat, lng)) # -1 is noise
         if not clusters: return None
+        # Find the largest cluster
         largest = max(clusters.items(), key=lambda kv: len(kv[1]))[1]
         clat = sum(l for l, _ in largest) / len(largest)
         clng = sum(g for _, g in largest) / len(largest)
@@ -535,6 +567,9 @@ def infer_timezone_from_coords(lat: Optional[float], lng: Optional[float]) -> Op
 def convert_to_local(ts: datetime, tz_name: Optional[str]) -> datetime:
     if not tz_name or not HAS_PYTZ: return ts
     try:
+        # Ensure timestamp is UTC-aware before conversion
+        if ts.tzinfo is None or ts.tzinfo.utcoffset(ts) is None:
+             ts = ts.replace(tzinfo=timezone.utc)
         tz = pytz.timezone(tz_name)
         return ts.astimezone(tz)
     except Exception as e:
@@ -585,8 +620,9 @@ def extract_entities_spacy(texts: List[Optional[str]]) -> List[Tuple[Tuple[str,s
         try:
             doc = nlp(t)
             for ent in doc.ents:
-                if ent.label_ in ("PERSON", "ORG", "GPE"):
-                    ents[(ent.label_, ent.text)] += 1
+                # Focus on relevant entity types
+                if ent.label_ in ("PERSON", "ORG", "GPE", "LOC", "NORP"):
+                    ents[(ent.label_, ent.text.strip())] += 1
         except Exception as e:
             logging.warning(f"spaCy NER error: {e}")
             continue
@@ -594,7 +630,10 @@ def extract_entities_spacy(texts: List[Optional[str]]) -> List[Tuple[Tuple[str,s
 
 def ghost_followers(p: Optional[Profile], recent_posts: int = 30) -> List[str]:
     if not p: return []
-    followers = {u.username for u in p.get_followers()}
+    try:
+        followers = {u.username for u in p.get_followers()}
+    except Exception as e:
+        logging.warning(f"Error getting followers for ghost detection: {e}"); return []
     engaged = set()
     count = 0
     for post in p.get_posts():
@@ -603,6 +642,7 @@ def ghost_followers(p: Optional[Profile], recent_posts: int = 30) -> List[str]:
         try:
             for c in post.get_comments(): engaged.add(c.owner.username)
             try:
+                # get_likes can sometimes fail on private accounts even if authorized
                 for l in post.get_likes(): engaged.add(l.username)
             except Exception:
                 pass
@@ -628,8 +668,10 @@ def likes_network(p: Optional[Profile], posts: int = 30) -> List[Tuple[str,int]]
 def posting_frequency_analytics(timestamps: List[datetime]) -> Dict[str, Any]:
     if not timestamps: return {"posts_per_month":"N/A","avg_gap_days":"N/A"}
     timestamps = sorted(timestamps)
+    # Total unique months
     months = Counter([(ts.year, ts.month) for ts in timestamps])
     gaps = []
+    # Calculate gaps between consecutive posts in days
     for a,b in zip(timestamps, timestamps[1:]):
         gaps.append((b - a).days)
     ppm = sum(months.values())/max(1,len(months))
@@ -642,7 +684,7 @@ def lda_topics(texts: List[str], n_topics: int = 3, n_words: int = 8) -> List[Di
     if not texts: return []
     vec = CountVectorizer(max_df=0.9, min_df=2, stop_words='english')
     X = vec.fit_transform(texts)
-    if X.shape[0] < 2: return []
+    if X.shape[0] < 2: return [] # Need at least 2 documents/features
     lda = LatentDirichletAllocation(n_components=min(n_topics, X.shape[0]), random_state=42)
     lda.fit(X)
     words = vec.get_feature_names_out()
@@ -654,6 +696,7 @@ def lda_topics(texts: List[str], n_topics: int = 3, n_words: int = 8) -> List[Di
 
 def ris_links(image_url: Optional[str]) -> Dict[str, str]:
     if not image_url: return {}
+    # Reverse Image Search (RIS) links
     return {
         "Google": f"https://images.google.com/searchbyimage?image_url={image_url}",
         "Yandex": f"https://yandex.com/images/search?rpt=imageview&url={image_url}",
@@ -674,35 +717,42 @@ def fetch_followers_bulk(L: Instaloader, usernames: List[str], per_user_limit: i
 def jaccard_similarity(a: List[str], b: List[str]) -> Tuple[float, int]:
     sa, sb = set(a), set(b)
     inter = len(sa & sb)
-    union = len(sa | sb) or 1
-    return inter / union, inter
+    union = len(sa | sb)
+    # FIX: Explicitly handle division by zero (union=0 should not happen if inputs are lists)
+    return inter / (union or 1), inter
 
 def mutual_overlap_pairs(L: Optional[Instaloader], seed_users: List[str], per_user_limit: int = 300, top_pairs: int = 100) -> List[Tuple[str,str,float,int]]:
     if not (L and HAS_INSTALOADER) or not seed_users: return []
+    # Only analyze the most engaged users for overlap to save time
     followers_map = fetch_followers_bulk(L, seed_users, per_user_limit=per_user_limit)
     scores = []
+    # Combinations of 2 users
     for u1, u2 in combinations(seed_users, 2):
         sim, inter = jaccard_similarity(followers_map.get(u1, []), followers_map.get(u2, []))
-        if inter > 0:
+        if inter > 0: # Only care about pairs with some overlap
             scores.append((u1, u2, sim, inter))
+    # Sort by the absolute number of overlaps, then by Jaccard similarity
     scores.sort(key=lambda x: (x[3], x[2]), reverse=True)
     return scores[:top_pairs]
 
 def cluster_posts_by_location(coords_with_ts: List[Tuple[float,float,datetime]], eps: float = 0.01, min_samples: int = 3) -> List[Dict[str, Any]]:
     if not HAS_SKLEARN or not coords_with_ts: return []
     try:
+        # Prepare data for DBSCAN (only lat/lng)
         X = [[lat, lng] for (lat, lng, _) in coords_with_ts if lat is not None and lng is not None]
         if len(X) < min_samples: return []
         labels = DBSCAN(eps=eps, min_samples=min_samples).fit_predict(X)
         clusters = defaultdict(list)
         idx = 0
+        # Re-associate the cluster label with the original (lat, lng, datetime)
         for (lat, lng, dt) in coords_with_ts:
-            if lat is None or lng is None: idx += 1; continue
+            if lat is None or lng is None: continue # Skip if no location data
             lbl = labels[idx]
-            if lbl != -1:
+            if lbl != -1: # Ignore noise
                 clusters[lbl].append((lat, lng, dt))
             idx += 1
         out = []
+        # Calculate the center (mean) for each cluster
         for lbl, pts in clusters.items():
             clat = sum(p[0] for p in pts)/len(pts)
             clng = sum(p[1] for p in pts)/len(pts)
@@ -715,7 +765,9 @@ def cluster_posts_by_location(coords_with_ts: List[Tuple[float,float,datetime]],
 def peak_hours_per_cluster(clusters: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     res = []
     for c in clusters:
+        # Infer timezone for the cluster center
         tz_name = infer_timezone_from_coords(c["center"][0], c["center"][1])
+        # Count local posting hours
         hours = Counter([convert_to_local(p[2], tz_name).hour for p in c["points"]])
         res.append({"label": c["label"], "lat": c["center"][0], "lng": c["center"][1], "top_hours": hours.most_common(3), "count": len(c["points"]), "tz": tz_name})
     return res
@@ -732,27 +784,37 @@ def detect_deleted(prev_path: str, current_post_ids: List[str]) -> Tuple[List[st
     except (OSError, IOError, json.JSONDecodeError):
         prev = []
     prev_set, cur_set = set(prev), set(current_post_ids)
-    return list(prev_set - cur_set), list(cur_set - prev_set)
+    # Deleted = posts in previous run but NOT in current run
+    deleted = list(prev_set - cur_set)
+    # Added = posts in current run but NOT in previous run
+    added = list(cur_set - prev_set)
+    return deleted, added
 
 def export_json(data: Dict[str, Any], path: str) -> None:
     with open(path, "w", encoding="utf-8") as f:
+        # Use default=str to serialize datetime objects
         json.dump(data, f, indent=2, ensure_ascii=False, default=str)
 
 def export_csv(data: Dict[str, Any], path: str) -> None:
+    # FIX: Flatten nested data properly for CSV
+    phone_clue_norm = data.get('text_clues', {}).get('phone_clue_norm')
+    phone_number = phone_clue_norm.get('number', 'N/A') if isinstance(phone_clue_norm, dict) else 'N/A'
+    
     flat = {
         'username': data.get('target_username'),
         'profile_exists': data.get('profile_exists'),
-        'bio': data.get('profile_data', {}).get('bio', 'N/A'),
+        'bio': data.get('profile_data', {}).get('bio', 'N/A').replace('\n', ' '),
         'primary_location': (data.get('most_frequent_location') or {}).get('name', 'N/A'),
         'last_post_ts': data.get('activity_data', {}).get('last_post_ts', 'N/A'),
         'public_email': data.get('profile_data', {}).get('public_email', 'N/A'),
         'contact_email_clue': data.get('text_clues', {}).get('email_in_text', 'N/A'),
+        'contact_phone_clue_norm': phone_number,
         'top_hashtag_1': (data.get('behavior_data', {}).get('top_hashtags') or [('N/A', 0)])[0][0],
         'followers_count': len(data.get('network_data', {}).get('followers', [])),
         'following_count': len(data.get('network_data', {}).get('following', [])),
         'mutuals_count': len(data.get('network_data', {}).get('mutual_followers', [])),
-        'peak_hours_top3': ','.join([f"{h[0]}({h[1]})" for h in data.get('temporal_data', {}).get('top_hours', [])[:3]]),
-        'peak_days_top3': ','.join([f"{d[0]}({d[1]})" for d in data.get('temporal_data', {}).get('top_days', [])[:3]]),
+        'peak_hours_top3': ';'.join([f"{h[0]}({h[1]})" for h in data.get('temporal_data', {}).get('top_hours', [])[:3]]),
+        'peak_days_top3': ';'.join([f"{d[0]}({d[1]})" for d in data.get('temporal_data', {}).get('top_days', [])[:3]]),
         'top_keyword': (data.get('keywords') or [('N/A', 0)])[0][0],
         'top_keyword_count': (data.get('keywords') or [('N/A', 0)])[0][1],
         'stories_count': data.get('stories', {}).get('count', 0),
@@ -763,7 +825,7 @@ def export_csv(data: Dict[str, Any], path: str) -> None:
         w.writeheader(); w.writerow(flat)
 
 def export_gexf(data: Dict[str, Any], path: str) -> None:
-    if not HAS_NETWORKX: raise RuntimeError("NetworkX required")
+    if not HAS_NETWORKX: raise RuntimeError("NetworkX required for GEXF export.")
     G = nx.DiGraph()
     target = data.get('target_username')
     pd = data.get('profile_data', {})
@@ -771,72 +833,102 @@ def export_gexf(data: Dict[str, Any], path: str) -> None:
     commenters = data.get('commenters', []) or []
     likes_net = data.get('likes_network', []) or []
     max_c = max([c for _, c in commenters], default=1)
+    # Target Node
     G.add_node(target, type='Target', label=target, size=10.0, color='#FF0000',
                is_business=str(pd.get('is_business')),
                email_present=str(pd.get('public_email') not in (None, "N/A")))
+    # Mutual Followers
     for m in mutuals:
         G.add_node(m, type='Mutual Follower', label=m, size=5.0, color='#00CC00')
         G.add_edge(target, m, type='Follows', weight=1.0)
         G.add_edge(m, target, type='Follows', weight=1.0)
+    # Commenters
     for u, c in commenters[:500]:
         w = float(c) / float(max_c)
         if u not in G: G.add_node(u, type='Commenter', label=u, size=4.0, color='#0066FF', comment_count=float(c))
         G.add_edge(u, target, type='Comment', weight=w)
+    # Likers
     for u, c in likes_net[:500]:
         if u not in G: G.add_node(u, type='Liker', label=u, size=3.5, color='#00AACC', like_count=float(c))
         G.add_edge(u, target, type='Like', weight=float(c))
+    # Follower Overlap Pairs
     overlaps = data.get('overlap_pairs', []) or []
     for u1, u2, sim, inter in overlaps[:300]:
         if u1 not in G: G.add_node(u1, type='User', label=u1, size=3.0, color='#888888')
         if u2 not in G: G.add_node(u2, type='User', label=u2, size=3.0, color='#888888')
+        # Undirected edge for overlap
         G.add_edge(u1, u2, type='FollowerOverlap', weight=float(sim), overlap_count=int(inter))
+    # Engagement Windows (Add properties to existing nodes)
     ew = data.get('engagement_windows', {}) or {}
     for u, meta in ew.items():
         if u in G.nodes:
             nx.set_node_attributes(G, {u: {"active_first": meta.get("first"), "active_last": meta.get("last"), "cmt": meta.get("comments"), "like": meta.get("likes")}})
+    
+    # GEXF only supports writing a single graph, even if it's a multigraph
     nx.write_gexf(G, path)
 
 def export_pdf(data: Dict[str, Any], path: str) -> None:
-    if not HAS_REPORTLAB: raise RuntimeError("ReportLab required")
+    if not HAS_REPORTLAB: raise RuntimeError("ReportLab required for PDF export.")
     styles = getSampleStyleSheet()
     doc = SimpleDocTemplate(path)
     elems = []
+    # Title
     title = Paragraph(f"Forensic OSINT Report: {data.get('target_username')}", styles['Title'])
     elems.append(title); elems.append(Spacer(1, 12))
     pd = data.get('profile_data', {})
+    
+    # Persistence Analysis
     elems.append(Paragraph("Forensic Persistence Analysis", styles['Heading2']))
     elems.append(Paragraph(f"<b>Deleted Posts (since last run):</b> {len(data.get('deleted_since_last_run', []))} posts", styles['Normal']))
     elems.append(Paragraph(f"<b>Added Posts (since last run):</b> {len(data.get('added_since_last_run', []))} posts", styles['Normal']))
     elems.append(Spacer(1, 12))
-    target_table = Table([
+    
+    # Target Information Table
+    target_table_data = [
         ["Username", data.get('target_username') or "N/A"],
-        ["Business", str(pd.get('is_business'))],
-        ["Public email", pd.get('public_email') or "N/A"],
-        ["Public phone", pd.get('public_phone') or "N/A"],
+        ["Business Account", str(pd.get('is_business'))],
+        ["Public Email", pd.get('public_email') or "N/A"],
+        ["Public Phone", pd.get('public_phone') or "N/A"],
         ["External URL", pd.get('external_url') or "N/A"],
-        ["Business category", pd.get('business_category') or "N/A"]
-    ], hAlign='LEFT')
+        ["Business Category", pd.get('business_category') or "N/A"]
+    ]
+    target_table = Table(target_table_data, hAlign='LEFT')
     target_table.setStyle(TableStyle([('BACKGROUND',(0,0),(1,0),colors.whitesmoke),('GRID',(0,0),(-1,-1),0.5,colors.grey)]))
-    elems.append(Paragraph("Target information", styles['Heading2'])); elems.append(target_table); elems.append(Spacer(1, 12))
+    elems.append(Paragraph("Target Profile Information", styles['Heading2'])); elems.append(target_table); elems.append(Spacer(1, 12))
+    
+    # Contact Clues
     tc = data.get('text_clues', {})
-    elems.append(Paragraph("Contact clues", styles['Heading2']))
+    elems.append(Paragraph("Contact Clues from Bio/External URL", styles['Heading2']))
     elems.append(Paragraph(f"Email in text: {tc.get('email_in_text','N/A')}", styles['Normal']))
-    elems.append(Paragraph(f"Phone in text: {tc.get('phone_in_text','N/A')} (normalized: {tc.get('phone_clue_norm')})", styles['Normal']))
+    phone_norm = tc.get('phone_clue_norm', {})
+    elems.append(Paragraph(f"Phone in text: {tc.get('phone_in_text','N/A')} (normalized: {phone_norm.get('number')} in {phone_norm.get('country')})", styles['Normal']))
     elems.append(Spacer(1, 12))
-    elems.append(Paragraph("Top hashtags", styles['Heading2']))
-    elems.append(Paragraph(", ".join([h for h,_ in data.get('behavior_data',{}).get('top_hashtags',[])[:10]]) or "N/A", styles['Normal']))
-    elems.append(Paragraph("Top keywords", styles['Heading2']))
-    elems.append(Paragraph(", ".join([k for k,_ in data.get('keywords',[])[:15]]) or "N/A", styles['Normal']))
+    
+    # Content and Linguistic Analysis
+    elems.append(Paragraph("Content & Keywords", styles['Heading2']))
+    elems.append(Paragraph("Top Hashtags: " + ", ".join([h for h,_ in data.get('behavior_data',{}).get('top_hashtags',[])[:10]]) or "N/A", styles['Normal']))
+    elems.append(Paragraph("Top Keywords: " + ", ".join([k for k,_ in data.get('keywords',[])[:15]]) or "N/A", styles['Normal']))
+    
+    # LDA Topics
+    topic_summary = []
+    for t in data.get('topics', []):
+        topic_summary.append(f"<b>Topic {t['topic']}:</b> {', '.join(t['terms'])}")
+    elems.append(Paragraph("Inferred Topics (LDA)", styles['Heading3']))
+    elems.append(Paragraph("<br/>".join(topic_summary) or "N/A", styles['Normal']))
     elems.append(Spacer(1, 12))
-    elems.append(Paragraph("Temporal peaks", styles['Heading2']))
+    
+    # Temporal Peaks
+    elems.append(Paragraph("Temporal Peaks", styles['Heading2']))
     th = data.get('temporal_data',{}).get('top_hours',[])[:5]
     td = data.get('temporal_data',{}).get('top_days',[])[:5]
-    elems.append(Paragraph("Peak hours: " + ", ".join([f"{h}:00({c})" for h,c in th]) if th else "N/A", styles['Normal']))
-    elems.append(Paragraph("Peak days: " + ", ".join([f"{d}({c})" for d,c in td]) if td else "N/A", styles['Normal']))
+    elems.append(Paragraph("Peak Hours (UTC/Local): " + ", ".join([f"{h}:00({c})" for h,c in th]) if th else "N/A", styles['Normal']))
+    elems.append(Paragraph("Peak Days: " + ", ".join([f"{d}({c})" for d,c in td]) if td else "N/A", styles['Normal']))
+    
+    # Location Clusters & Local Time Peaks
     ctp = data.get('cluster_temporal', [])
     if ctp:
         elems.append(Spacer(1, 12))
-        elems.append(Paragraph("Location clusters (local time peaks)", styles['Heading2']))
+        elems.append(Paragraph("Location Clusters (Local Time Peaks)", styles['Heading2']))
         rows = [["Label","Lat","Lng","TZ","Top hours","Count"]]
         for cl in ctp[:10]:
             rows.append([str(cl.get('label')), f"{cl.get('lat'):.5f}", f"{cl.get('lng'):.5f}", cl.get('tz') or "N/A",
@@ -844,25 +936,30 @@ def export_pdf(data: Dict[str, Any], path: str) -> None:
         t = Table(rows, hAlign='LEFT')
         t.setStyle(TableStyle([('GRID',(0,0),(-1,-1),0.5,colors.grey),('BACKGROUND',(0,0),(-1,0),colors.whitesmoke)]))
         elems.append(t)
+    
     doc.build(elems)
 
 def engagement_windows(p: Optional[Profile], posts: int=60) -> Dict[str,Dict[str,Any]]:
     if not p: return {}
+    # Structure: {username: [first_ts, last_ts, comment_count, like_count]}
     windows: Dict[str,List[Any]] = defaultdict(lambda: [None, None, 0, 0])
     count = 0
     for post in p.get_posts():
         if count >= posts: break
         count += 1
         ts = post.date_utc
+        # Process Comments
         try:
             for c in post.get_comments():
                 u = c.owner.username
                 w = windows[u]
+                # Update first and last timestamp
                 w[0] = ts if w[0] is None or ts < w[0] else w[0]
                 w[1] = ts if w[1] is None or ts > w[1] else w[1]
                 w[2] += 1
         except Exception:
             pass
+        # Process Likes
         try:
             for l in post.get_likes():
                 u = l.username
@@ -872,25 +969,38 @@ def engagement_windows(p: Optional[Profile], posts: int=60) -> Dict[str,Dict[str
                 w[3] += 1
         except Exception:
             pass
+    # Convert timestamps to ISO format strings
     return {u: {"first": w[0].isoformat() if w[0] else None, "last": w[1].isoformat() if w[1] else None,
                 "comments": w[2], "likes": w[3]} for u, w in windows.items()}
 
 def build_analysis(req: Requester, username: str, sessionid: Optional[str], post_limit: int, persist_dir: str,
                    deep_network: bool, cluster_temporal: bool, login_user: Optional[str], login_pass: Optional[str]) -> Dict[str, Any]:
-    analysis: Dict[str, Any] = {"target_username": username}
+    
+    analysis: Dict[str, Any] = {"target_username": username, 'network_data': {'followers': [], 'following': [], 'mutual_followers': []}, 'cluster_temporal': []}
+    
+    # 1. Instaloader Check/Login
     L, p, sessionid_iloader = load_profile_instaloader(username, DEFAULT_CONFIG["instaloader_session_dir"], login_user, login_pass)
     if sessionid_iloader:
+        # Prioritize the sessionid derived from successful Instaloader login
         sessionid = sessionid_iloader
         logging.info("Using Instaloader-derived sessionid for API calls.")
+        
+    # 2. Resolve User ID (Requires an ID for most mobile API calls)
     uid, source, raw_used = resolve_user_id(req, username, sessionid)
     analysis['resolved_id'] = uid; analysis['id_source'] = source
+    
+    # 3. Fetch User Info (Private API/Mobile API)
     user_info = get_user_info_private(req, uid, sessionid) if uid else {}
     user_raw = user_info.get("raw") or {}
     analysis['raw_user'] = user_raw
+    
+    # 4. Profile Data (Prioritize Instaloader (p) if available)
     if p:
         prof_res = analyze_profile_location_from_profile(p, n=post_limit)
+        # FIX: Explicitly update analysis dictionary to merge Instaloader data
         analysis.update(prof_res)
     else:
+        # Fallback: Use Mobile API data
         analysis['profile_exists'] = bool(user_raw)
         analysis['profile_data'] = {
             'bio': user_raw.get('biography'),
@@ -902,12 +1012,20 @@ def build_analysis(req: Requester, username: str, sessionid: Optional[str], post
             'business_category': user_raw.get('business_category_name') or "N/A"
         }
         analysis['text_clues'] = extract_contact_info(f"{analysis['profile_data']['bio'] or ''} {analysis['profile_data']['external_url'] or ''}")
+        analysis['most_frequent_location'] = None
+        analysis['all_coords'] = []
+    
+    # 5. Normalize Contact Info
     analysis['text_clues']['phone_clue_norm'] = normalize_phone(analysis['text_clues'].get('phone_in_text'))
     analysis['profile_data']['public_phone_norm'] = normalize_phone(analysis['profile_data'].get('public_phone'))
+    
+    # 6. Fetch Feed/Media (Mobile API)
     feed = get_feed_media(req, uid, sessionid, count=post_limit).get("raw") if uid else {}
     analysis['feed_raw'] = feed
     fi = infer_locations_from_feed(feed)
     analysis['activity_data'] = {'last_post_ts': fi.get('last_post_ts'), 'feed_locations': fi}
+    
+    # 7. Extract Captions/Timestamps from Feed API (if Instaloader wasn't used)
     captions, timestamps, post_ids_for_persist = [], [], []
     items = feed.get("items") or []
     for it in items:
@@ -917,51 +1035,71 @@ def build_analysis(req: Requester, username: str, sessionid: Optional[str], post
         taken = it.get("taken_at") or it.get("device_timestamp") or it.get("timestamp")
         if taken:
             try:
+                # API timestamps are in seconds
                 timestamps.append(datetime.fromtimestamp(int(taken), tz=timezone.utc))
             except (ValueError, TypeError):
                 pass
         pid = it.get("id") or it.get("pk")
         if pid: post_ids_for_persist.append(str(pid))
+
+    # 8. Post Behavior/Content Analysis (Prioritize Instaloader data)
     if p:
         beh = analyze_post_behavior_from_profile(p, n=post_limit)
         analysis['behavior_data'] = beh
+        # Use Instaloader's timestamps/captions as they are more complete
         timestamps = beh.get('timestamps') or timestamps
         captions = beh.get('captions') or captions
     else:
         analysis['behavior_data'] = {'top_hashtags': [], 'top_mentions': [], 'timestamps': timestamps, 'captions': captions}
-    tz_name = None
+
+    # 9. Location Aggregation/Clustering
     mfl = analysis.get('most_frequent_location')
     if not mfl and fi.get('locations'):
+        # FIX: Simplified location counting using Counter on API locations
         counts = Counter([l.get('name') for l in fi['locations'] if l.get('name')])
         if counts:
             top_name, ct = counts.most_common(1)[0]
+            # Find the full location dict to get lat/lng
             for l in fi['locations']:
                 if l.get('name') == top_name:
-                    mfl = {'name': top_name, 'lat': l.get('lat'), 'lng': l.get('lng'), 'count': ct}
+                    analysis['most_frequent_location'] = {'name': top_name, 'lat': l.get('lat'), 'lng': l.get('lng'), 'count': ct}
                     break
-    analysis['most_frequent_location'] = mfl
-    if p:
-        coords_only = [(lat, lng) for (lat, lng, _) in analysis.get('all_coords', []) if lat is not None and lng is not None]
-        cluster = cluster_primary_location(coords_only)
+    
+    # Run DBSCAN on all Instaloader coordinates if available
+    if p and analysis.get('all_coords'):
+        cluster = cluster_primary_location(analysis['all_coords'])
         if cluster:
             analysis['cluster_primary'] = cluster
-            if not analysis['most_frequent_location']:
+            # If no Instaloader location data was found, use the primary cluster as a location clue
+            if not analysis['most_frequent_location'] or analysis['most_frequent_location'].get('name') == 'cluster_primary':
                 analysis['most_frequent_location'] = {'name': 'cluster_primary', 'lat': cluster['lat'], 'lng': cluster['lng'], 'count': cluster['count']}
+    
+    # 10. Temporal Analysis (with Timezone Correction)
+    tz_name = None
     if analysis['most_frequent_location'] and HAS_TZF and HAS_PYTZ:
         tz_name = infer_timezone_from_coords(analysis['most_frequent_location'].get('lat'), analysis['most_frequent_location'].get('lng'))
         if tz_name:
+            # Convert all timestamps to the target's inferred local time
             timestamps = [convert_to_local(ts, tz_name) for ts in timestamps]
-    if cluster_temporal and p:
-        clusters = cluster_posts_by_location(analysis.get('all_coords', []), eps=0.01, min_samples=3)
+            
+    # Location/Temporal Clustering
+    if cluster_temporal and p and analysis.get('all_coords'):
+        clusters = cluster_posts_by_location(analysis['all_coords'], eps=0.01, min_samples=3)
         analysis['cluster_temporal'] = peak_hours_per_cluster(clusters)
+        
+    # Calculate peak hours/days using (potentially local) timestamps
     hours, days = Counter(), Counter()
     for ts in timestamps:
         hours[ts.hour] += 1; days[ts.strftime('%A')] += 1
-    analysis['temporal_data'] = {"top_hours": hours.most_common(24), "top_days": days.most_common(7)}
+    analysis['temporal_data'] = {"top_hours": hours.most_common(24), "top_days": days.most_common(7), "tz_used": tz_name or "UTC/None"}
+    
+    # 11. Linguistic/Content Analysis
     all_texts = [analysis['profile_data'].get('bio'), analysis['profile_data'].get('external_url')] + captions
     analysis['keywords'] = extract_keywords(all_texts)
     analysis['entities'] = extract_entities_spacy(all_texts)
     analysis['topics'] = lda_topics(captions, n_topics=3, n_words=8)
+    
+    # TextBlob (Sentiment/Language)
     analysis['linguistic_analysis'] = []
     if HAS_TEXTBLOB:
         for t in (captions + [analysis['profile_data'].get('bio'), analysis['profile_data'].get('external_url')]):
@@ -973,20 +1111,34 @@ def build_analysis(req: Requester, username: str, sessionid: Optional[str], post
                 analysis['linguistic_analysis'].append({"text": t[:50], "lang": lang, "sentiment": b.sentiment.polarity})
             except Exception as e:
                 logging.warning(f"TextBlob error: {e}")
+                
+    # 12. Reverse Image Search (RIS) and EXIF
     pic_url = None
     if isinstance(user_raw, dict):
-        for k in ("profile_pic_url_hd", "profile_pic_url"):
-            if user_raw.get(k): pic_url = user_raw.get(k); break
+        # Prefer HD pic from mobile API
+        hd = user_raw.get("hd_profile_pic_url_info") or {}
+        pic_url = hd.get("url")
         if not pic_url:
-            hd = user_raw.get("hd_profile_pic_url_info") or {}
-            pic_url = hd.get("url")
+            for k in ("profile_pic_url_hd", "profile_pic_url"):
+                if user_raw.get(k): pic_url = user_raw.get(k); break
     if not pic_url and p:
         try:
             pic_url = getattr(p, "profile_pic_url", None)
         except Exception:
             pic_url = None
+    
     analysis['exif_data'] = exif_from_url_native(req, pic_url) if pic_url else {"error": "No profile picture URL"}
     analysis['ris'] = ris_links(pic_url)
+
+    # 13. Network Analysis (Requires Instaloader for in-depth data)
+    analysis['commenters'] = []
+    analysis['stories'] = {"count": 0, "locations": []}
+    analysis['ghost_followers'] = []
+    analysis['likes_network'] = []
+    analysis['posting_frequency'] = posting_frequency_analytics(timestamps)
+    analysis['engagement_windows'] = {}
+    analysis['overlap_pairs'] = []
+    
     if p:
         net = {"followers": [], "following": []}
         try:
@@ -997,55 +1149,53 @@ def build_analysis(req: Requester, username: str, sessionid: Optional[str], post
             net["following"] = [f.username for f in p.get_followees()][:1000]
         except Exception as e:
             logging.warning(f"Followees list error: {e}")
+            
         analysis['network_data'] = {'followers': net['followers'], 'following': net['following'], 'mutual_followers': list(set(net['followers']) & set(net['following']))}
+        
+        # Engagement metrics
         commenters_ranked, comment_texts_by_user = analyze_comments_from_profile(p, post_limit=60, collect_texts=True)
         analysis['commenters'] = commenters_ranked
         analysis['comment_texts_by_user'] = comment_texts_by_user
-        analysis['stories'] = {"count": 0, "locations": []}
+        analysis['ghost_followers'] = ghost_followers(p, recent_posts=30)
+        analysis['likes_network'] = likes_network(p, posts=30)
+        analysis['engagement_windows'] = engagement_windows(p, posts=60)
+        
+        # Stories (Can be slow/rate-limited)
         try:
             stories = list(p.get_stories())
             analysis['stories']["count"] = len(stories)
         except Exception as e:
             logging.warning(f"Stories error: {e}")
-        analysis['ghost_followers'] = ghost_followers(p, recent_posts=30)
-        analysis['likes_network'] = likes_network(p, posts=30)
-        analysis['posting_frequency'] = posting_frequency_analytics(timestamps)
-        analysis['engagement_windows'] = engagement_windows(p, posts=60)
+            
+        # Deep Network Analysis (Follower Overlap)
         if deep_network and L:
             top_seed = list({u for u,_ in (analysis['likes_network'][:50] + analysis['commenters'][:50])} | set(analysis['network_data']['mutual_followers'][:50]))
             analysis['overlap_pairs'] = mutual_overlap_pairs(L, top_seed, per_user_limit=300, top_pairs=100)
-    else:
-        analysis['network_data'] = {'followers': [], 'following': [], 'mutual_followers': []}
-        analysis['commenters'] = []
-        analysis['stories'] = {"count": 0, "locations": []}
-        analysis['ghost_followers'] = []
-        analysis['likes_network'] = []
-        analysis['posting_frequency'] = {}
-        analysis['engagement_windows'] = {}
-        analysis['overlap_pairs'] = []
-        analysis['cluster_temporal'] = []
+
+    # 14. Persistence (Post Deletion/Addition Detection)
     os.makedirs(persist_dir, exist_ok=True)
     persist_path = os.path.join(persist_dir, f"{username}_posts.json")
     deleted, added = detect_deleted(persist_path, post_ids_for_persist)
     analysis['deleted_since_last_run'] = deleted
     analysis['added_since_last_run'] = added
     persist_post_ids(persist_path, post_ids_for_persist)
+    
     return analysis
 
 def parse_args():
     ap = argparse.ArgumentParser(description="InstaOSNIT_forensic_final - Forensic-grade Instagram OSINT")
     ap.add_argument("--target", "-t", required=True, help="Target username")
-    ap.add_argument("--sessionid", "-s", required=False, help="Instagram sessionid cookie")
+    ap.add_argument("--sessionid", "-s", required=False, help="Instagram sessionid cookie (for mobile API access)")
     ap.add_argument("--post-limit", "-n", type=int, default=200, help="Number of posts to analyze")
     ap.add_argument("--output", "-o", default=None, help="Output filename")
     ap.add_argument("--format", "-f", choices=["json","csv","gexf","pdf"], default="json")
-    ap.add_argument("--terms", nargs="*", default=[], help="Targeted keyword search terms")
-    ap.add_argument("--proxies", default=DEFAULT_CONFIG["proxies_file"], help="Proxies file")
-    ap.add_argument("--ua-file", default=None, help="User-Agent file")
-    ap.add_argument("--persist-dir", default=DEFAULT_CONFIG["persist_dir"], help="Persistence directory")
-    ap.add_argument("--deep-network", action="store_true", help="Follower overlap analysis")
-    ap.add_argument("--cluster-temporal", action="store_true", help="Per-location peak hours")
-    ap.add_argument("--login-user", default=None, help="Instaloader login username")
+    ap.add_argument("--terms", nargs="*", default=[], help="Targeted keyword search terms (regular expressions supported)")
+    ap.add_argument("--proxies", default=DEFAULT_CONFIG["proxies_file"], help="Proxies file (one per line, format: http://user:pass@host:port)")
+    ap.add_argument("--ua-file", default=None, help="File containing custom User-Agents (one per line)")
+    ap.add_argument("--persist-dir", default=DEFAULT_CONFIG["persist_dir"], help="Persistence directory for post IDs")
+    ap.add_argument("--deep-network", action="store_true", help="Perform follower overlap analysis on top engagers (requires login)")
+    ap.add_argument("--cluster-temporal", action="store_true", help="Cluster posts by location and infer local peak hours (requires Instaloader)")
+    ap.add_argument("--login-user", default=None, help="Instaloader login username (to enable authenticated fetching)")
     ap.add_argument("--login-pass", default=None, help="Instaloader login password")
     ap.add_argument("--log-file", default=DEFAULT_CONFIG["log_file"], help="Log file path")
     return ap.parse_args()
@@ -1053,6 +1203,8 @@ def parse_args():
 def main():
     args = parse_args()
     setup_logging(args.log_file)
+    
+    # Load User Agents
     if args.ua_file and os.path.exists(args.ua_file):
         try:
             with open(args.ua_file, "r", encoding="utf-8") as f:
@@ -1060,18 +1212,29 @@ def main():
                 if lines: UA_POOL[:] = lines
         except (OSError, IOError) as e:
             logging.error(f"UA pool load error: {e}")
+            
+    # Proxy Setup
     proxies = load_proxies(args.proxies)
     proxy_pool = StickyProxyPool(proxies, DEFAULT_CONFIG["sticky_seconds"])
     req = Requester(proxy_pool)
+    
+    # Session ID Check
     sessionid = args.sessionid
     if sessionid and not check_session_validity(req, sessionid):
-        logging.warning("Provided sessionid appears invalid or expired.")
+        logging.warning("Provided sessionid appears invalid or expired. Results may be limited.")
+        
+    # Main Analysis Build
+    logging.info(f"Starting OSINT analysis for target: {args.target}")
     analysis = build_analysis(req, args.target, sessionid=sessionid, post_limit=args.post_limit, persist_dir=args.persist_dir,
                               deep_network=args.deep_network, cluster_temporal=args.cluster_temporal,
                               login_user=args.login_user, login_pass=args.login_pass)
+    
+    # Targeted Search
     if args.terms:
         all_texts = [analysis['profile_data'].get('bio'), analysis['profile_data'].get('external_url')] + (analysis.get('behavior_data',{}).get('captions') or [])
         analysis['targeted_search_results'] = targeted_keyword_search(all_texts, args.terms)
+        
+    # Export Results
     out = args.output or f"{args.target}_report.{args.format}"
     try:
         if args.format == "json":
@@ -1082,12 +1245,13 @@ def main():
             export_gexf(analysis, out)
         elif args.format == "pdf":
             export_pdf(analysis, out)
-        logging.info(f"Exported: {out}")
+        logging.info(f"Exported analysis report: {out}")
         print(out)
     except Exception as e:
-        logging.error(f"Export failed: {e}")
+        logging.error(f"Export failed for format {args.format}: {e}. Saving fallback JSON.")
         try:
-            fallback = f"{args.target}_report.json"
+            # Fallback to JSON is crucial to save the gathered data
+            fallback = f"{args.target}_report_fallback.json"
             export_json(analysis, fallback)
             logging.info(f"Saved fallback JSON: {fallback}")
             print(fallback)
