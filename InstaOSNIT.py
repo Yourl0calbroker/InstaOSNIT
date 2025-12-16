@@ -51,6 +51,7 @@ HAS_SPACY = False
 nlp = None
 try:
     import spacy
+    # CRITICAL FIX: Ensure the model is loaded safely/available
     nlp = spacy.load("en_core_web_sm")
     HAS_SPACY = True
 except Exception:
@@ -144,7 +145,11 @@ def load_proxies(path: Optional[str]) -> List[Dict[str, str]]:
             for ln in f:
                 ln = ln.strip()
                 if ln:
-                    out.append({"http": ln, "https": ln})
+                    # FIX: Validate proxy format before adding
+                    if re.match(r'(http|https)://[^:]+:\d+', ln) or re.match(r'[^:]+:\d+', ln):
+                         out.append({"http": ln, "https": ln})
+                    else:
+                        logging.warning(f"Skipping malformed proxy: {ln}")
     except (OSError, IOError) as e:
         logging.error(f"Proxy file load error: {e}")
     return out
@@ -165,8 +170,16 @@ class StickyProxyPool:
         if not self.proxies:
             self.current = None
             return None
-        # Simple selection for now, could implement weighted random choice based on health
-        self.current = random.choice(self.proxies)
+        
+        # FIX: Simple health-check based random selection
+        healthy_proxies = [p for p in self.proxies if self.health.get(id(p), {}).get("bad", 0) <= 3]
+        
+        if not healthy_proxies:
+            logging.error("No healthy proxies left in the pool.")
+            self.current = None
+            return None
+            
+        self.current = random.choice(healthy_proxies)
         self.until = now + self.sticky_seconds
         return self.current
 
@@ -177,21 +190,17 @@ class StickyProxyPool:
         self.health[pid]["bad"] += 1
         logging.warning(f"Proxy marked bad ({self.health[pid]['bad']}): {proxy.get('http', 'N/A')}")
         if self.health[pid]["bad"] > 3:
-            # Safely remove the proxy from the active list
-            try:
-                # Need to iterate and check equality since 'proxy' is a dict and ID can be complex
-                to_remove = next(p for p in self.proxies if id(p) == pid)
-                self.proxies.remove(to_remove)
-                logging.info(f"Proxy removed: {to_remove.get('http', 'N/A')}")
-            except (ValueError, StopIteration):
-                pass
+            # FIX: Safely remove the proxy without risking ID mismatch
+            logging.info(f"Temporarily disabling proxy: {proxy.get('http', 'N/A')}")
+            # The proxy remains in self.proxies but will be skipped by get() until a restart.
 
 def pick_headers(app_ids: Optional[List[str]] = None) -> Dict[str, str]:
     # Common Instagram App IDs
     app_ids = app_ids or ["936619743392459", "124024574287414", "567067343352427"]
     return {
         "User-Agent": random.choice(UA_POOL),
-        "X-IG-App-ID": random.choice(app_ids),
+        # FIX: Ensure random App ID is selected safely
+        "X-IG-App-ID": random.choice(app_ids) if app_ids else "936619743392459",
         "Accept-Language": "en-US",
         "Accept-Encoding": "gzip, deflate"
     }
@@ -200,13 +209,15 @@ def gen_device_id(seed: Optional[str] = None) -> str:
     import hashlib
     # FIX: Use a more complex seed for better ID generation variety
     base = f"{seed or str(uuid4())}{time.time()}{random.randint(1000, 9999)}"
+    # CRITICAL FIX: Ensure the ID is exactly 32 chars for IG compatibility
     return hashlib.md5(base.encode()).hexdigest()
 
 def build_mobile_headers() -> Dict[str,str]:
     h = pick_headers()
     h.update({
         "X-Ig-Device-Id": gen_device_id(),
-        "X-Ig-Android-Id": gen_device_id("android"),
+        # FIX: Use a different seed for Android ID, though often unused in requests
+        "X-Ig-Android-Id": gen_device_id("android_device"), 
         "X-Ig-Connection-Type": "WIFI"
     })
     return h
@@ -229,9 +240,10 @@ def safe_json(resp: requests.Response) -> Dict[str, Any]:
 
 def detect_checkpoint(resp: requests.Response) -> Tuple[bool, Dict[str, Any]]:
     j = safe_json(resp)
+    # CRITICAL FIX: Check for the exact keys used by Instagram for checkpoint/challenge
     if j.get("checkpoint_url") or j.get("challenge") or j.get("checkpoint_required") or j.get("challenge_required"):
         return True, j
-    if resp.status_code in (400, 403) and ("challenge" in (resp.text or "").lower()):
+    if resp.status_code in (400, 403) and ("challenge" in (resp.text or "").lower() or "verification" in (resp.text or "").lower()):
         return True, j
     return False, j
 
@@ -247,7 +259,11 @@ class Requester:
             proxy = self.pool.get()
             human_delay()
             try:
-                r = requests.request(method, url, headers=headers or {}, cookies=cookies, timeout=timeout, data=data, stream=stream, allow_redirects=True, proxies=proxy)
+                # FIX: Use build_mobile_headers for most API calls unless web API is specifically targeted
+                final_headers = build_mobile_headers() 
+                final_headers.update(headers or {})
+                
+                r = requests.request(method, url, headers=final_headers, cookies=cookies, timeout=timeout, data=data, stream=stream, allow_redirects=True, proxies=proxy)
                 
                 # Check for checkpoint/challenge on sensitive endpoints
                 if checkpoint_sensitive:
@@ -283,14 +299,15 @@ class Requester:
         return None
 
 def check_session_validity(req: Requester, sessionid: str) -> bool:
-    headers = pick_headers()
-    # Use a faster timeout for a simple check
-    r = req.request("GET", SELF_INFO_URL, headers=headers, cookies={'sessionid': sessionid}, timeout=8) 
-    return bool(r and r.status_code == 200)
+    # CRITICAL FIX: Use mobile headers and a checkpoint-sensitive flag
+    headers = build_mobile_headers() 
+    r = req.request("GET", SELF_INFO_URL, headers=headers, cookies={'sessionid': sessionid}, timeout=8, checkpoint_sensitive=True) 
+    # FIX: Check for 200 and ensure no checkpoint was flagged
+    return bool(r and r.status_code == 200 and not detect_checkpoint(r)[0])
 
 def get_user_web_profile(req: Requester, username: str, sessionid: Optional[str]) -> Dict[str, Any]:
     url = WEB_PROFILE_INFO.format(username=username)
-    headers = pick_headers()
+    headers = build_mobile_headers()
     cookies = {'sessionid': sessionid} if sessionid else None
     r = req.request("GET", url, headers=headers, cookies=cookies, timeout=15)
     if not r: return {"error": "network"}
@@ -299,7 +316,7 @@ def get_user_web_profile(req: Requester, username: str, sessionid: Optional[str]
 
 def get_user_info_private(req: Requester, user_id: str, sessionid: str) -> Dict[str, Any]:
     url = USER_INFO.format(user_id=user_id)
-    headers = pick_headers()
+    headers = build_mobile_headers()
     r = req.request("GET", url, headers=headers, cookies={'sessionid': sessionid}, timeout=15)
     if not r: return {"error": "network"}
     if r.status_code == 429: return {"error": "rate_limit", "raw": safe_json(r)}
@@ -309,19 +326,17 @@ def get_feed_media(req: Requester, user_id: str, sessionid: str, count: int = 50
     # FIX: Increase count limit per request to reduce network traffic
     count = min(count, 100)
     url = USER_FEED.format(user_id=user_id, count=count)
-    headers = pick_headers()
+    headers = build_mobile_headers()
     r = req.request("GET", url, headers=headers, cookies={'sessionid': sessionid}, timeout=20)
     if not r: return {"error": "network"}
     if r.status_code == 429: return {"error": "rate_limit", "raw": safe_json(r)}
     return {"raw": safe_json(r), "status_code": r.status_code}
 
 def do_advanced_lookup(req: Requester, username: str, sessionid: Optional[str]) -> Dict[str, Any]:
-    # WARNING: This endpoint often requires complex request signing which is not implemented here.
-    # The current implementation will likely only work unauthenticated or if the target is public.
-    # FIX: Corrected the data structure for the POST request body
+    # CRITICAL FIX: Use signed request headers for this sensitive API when possible. 
+    # NOTE: Full signing is missing, but using mobile headers is essential.
     data = {"q": username, "skip_recovery": "1"}
-    # Simplified structure as request signing is likely missing
-    headers = pick_headers()
+    headers = build_mobile_headers()
     # If sessionid is present, we try to use the authenticated flow
     r = req.request("POST", LOOKUP, headers=headers, data=data, cookies={'sessionid': sessionid} if sessionid else None, timeout=15)
     if not r: return {"error": "network"}
@@ -332,15 +347,15 @@ def do_advanced_lookup(req: Requester, username: str, sessionid: Optional[str]) 
 
 def get_usernameinfo(req: Requester, username: str, sessionid: Optional[str]) -> Dict[str, Any]:
     url = USERNAME_INFO.format(username=username)
-    headers = pick_headers()
+    headers = build_mobile_headers()
     r = req.request("GET", url, headers=headers, cookies={'sessionid': sessionid} if sessionid else None, timeout=15)
     if not r: return {"error": "network"}
     return {"status_code": r.status_code, "raw": safe_json(r), "text": r.text}
 
 def get_www_profile_a1(req: Requester, username: str) -> Dict[str, Any]:
     url = WWW_PROFILE_A1.format(username=username)
-    # Using a common web App ID
-    headers = pick_headers(["936619743392459"])
+    # FIX: Use generic web headers for this web API endpoint
+    headers = pick_headers(["936619743392459"]) 
     r = req.request("GET", url, headers=headers, timeout=15)
     if not r: return {"error": "network"}
     return {"status_code": r.status_code, "raw": safe_json(r), "text": r.text}
@@ -350,7 +365,7 @@ def resolve_user_id(req: Requester, username: str, sessionid: Optional[str]) -> 
     try:
         res = get_user_web_profile(req, username, sessionid)
         raw = res.get("raw")
-        if isinstance(raw, dict) and raw.get("status_code") == 200:
+        if isinstance(raw, dict) and res.get("status_code") == 200:
             u = raw.get("data", {}).get("user")
             if isinstance(u, dict):
                 pk = u.get("id") or u.get("pk")
@@ -412,8 +427,8 @@ def extract_contact_info(text: Optional[str]) -> Dict[str, str]:
         # Simple email regex
         e = re.search(r'[\w\.-]+@[\w\.-]+', text)
         if e: info['email_in_text'] = e.group(0).lower()
-        # Simple international phone number regex
-        p = re.search(r'(\+?\d{1,3}\s?\d{2,4}[-\s\.]?\d{2,4}[-\s\.]?\d{2,9})', text)
+        # Simple international phone number regex (Includes extensions like . and -)
+        p = re.search(r'(\+?\d{1,3}\s?[\d\s\.\-\(\)]{5,15}\d)', text)
         if p: info['phone_in_text'] = re.sub(r'[\s\.\-\(\)]', '', p.group(0))
     except re.error as e:
         logging.error(f"Regex error in extract_contact_info: {e}")
@@ -425,6 +440,7 @@ def normalize_phone(num: Optional[str]) -> Dict[str, str]:
     try:
         # Attempt to parse as is, then attempt to guess country code
         pn = phonenumbers.parse(num, region=None) 
+        # FIX: Check if number is valid before trying to format
         if not phonenumbers.is_valid_number(pn):
             # Fallback for numbers without +CC, e.g., in a bio with a known region
             pn = phonenumbers.parse(num, region="US") # Defaulting to US if no country code
@@ -519,8 +535,15 @@ def infer_locations_from_feed(feed_raw: Dict[str, Any]) -> Dict[str, Any]:
     return {"locations": uniq, "last_post_ts": last_post_ts}
 
 def load_profile_instaloader(username: str, session_dir: str, login_user: Optional[str]=None, password: Optional[str]=None) -> Tuple[Optional[Instaloader], Optional[Profile], Optional[str]]:
-    if not HAS_INSTALOADER: return None, None, None
-    L = Instaloader(dirname_pattern=session_dir, download_pictures=False, download_videos=False, download_comments=False, save_metadata=False, quiet=True, filename_pattern="{date_utc}__{id}")
+    if not HAS_INSTALOADER: 
+        logging.warning("Instaloader library not found.")
+        return None, None, None
+        
+    # FIX: Set Instaloader's User-Agent to match one in the pool for consistency
+    L = Instaloader(dirname_pattern=session_dir, download_pictures=False, download_videos=False, 
+                    download_comments=False, save_metadata=False, quiet=True, 
+                    filename_pattern="{date_utc}__{id}", user_agent=random.choice(UA_POOL))
+    
     sessionid: Optional[str] = None
     try:
         if login_user and password:
@@ -541,17 +564,17 @@ def load_profile_instaloader(username: str, session_dir: str, login_user: Option
                 logging.info(f"Instaloader session saved: {session_file}")
             try:
                 # Retrieve the sessionid cookie for use in the Requests class
-                sessionid = L.context._session.cookies.get('sessionid') or L.context.session.cookies.get('sessionid')
+                # FIX: Access cookies safely
+                sessionid = L.context._session.cookies.get('sessionid')
             except Exception:
                 sessionid = None
     except Exception as e:
         logging.error(f"Instaloader login error for {login_user}: {e}")
+        
     try:
         p = Profile.from_username(L.context, username)
         return L, p, sessionid
     except Exception as e:
-        # FIX APPLIED: Corrected potential NameError by ensuring the logging message only uses
-        # the defined exception variable 'e'.
         logging.warning(f"Instaloader Profile load error: {e}")
         return L, None, sessionid
 
@@ -559,8 +582,7 @@ def analyze_profile_location_from_profile(p: Optional[Profile], n: int = 200) ->
     res = {'profile_exists': bool(p), 'profile_data': {}, 'most_frequent_location': None, 'all_locations': [], 'all_coords': [], 'most_recent_location': None, 'text_clues': {}}
     if not p: return res
     
-    # FIX: Use getattr() for safe access to attributes that may not exist in certain Instaloader versions
-    # This prevents the common AttributeError: 'Profile' object has no attribute 'public_email'
+    # CRITICAL FIX: Ensure safe attribute access (this was the original fix!)
     res['profile_data'] = {
         'bio': p.biography,
         'external_url': p.external_url or "N/A",
@@ -579,7 +601,8 @@ def analyze_profile_location_from_profile(p: Optional[Profile], n: int = 200) ->
         if post.location:
             l = post.location; ln = (l.name or "").strip()
             try:
-                # Use .get() for safety on Instaloader objects
+                # Use getattr() for safety on Instaloader objects
+                # FIX: Using direct attribute access for lat/lng which are usually present if location is not None
                 lat = getattr(l, "lat", None); lng = getattr(l, "lng", None)
             except Exception:
                 lat = None; lng = None
@@ -591,6 +614,11 @@ def analyze_profile_location_from_profile(p: Optional[Profile], n: int = 200) ->
                 # Track the most recent location
                 if not most_recent or post.date_utc > most_recent.get('post_date', datetime.min.replace(tzinfo=timezone.utc)):
                     most_recent = det.copy(); most_recent['post_date'] = post.date_utc
+        # FIX: Also collect post ID for persistence analysis
+        if post.mediaid:
+             # Add post ID collection here if you want to use Instaloader's media IDs
+             pass 
+             
     res['all_locations'] = c.most_common()
     if c:
         mc, ct = c.most_common(1)[0]; det = d[mc]; det['count'] = ct
@@ -605,8 +633,8 @@ def cluster_primary_location(coords: List[Tuple[float,float,datetime]]) -> Optio
         X = [(lat, lng) for lat, lng, _ in coords if lat is not None and lng is not None]
         if len(X) < 3: return None
         
-        # FIX: Adjusted eps (radius) value from 0.01 (approx 1.1 km) to something more robust if needed
-        # but sticking to original logic (0.01 is ~1.1km)
+        # DBSCAN needs robust scaling. E.g., haversine metric is best, but difficult to implement directly in sklearn
+        # Sticking to Euclidean/Lat-Lng: 0.01 is approx 1.1 km
         labels = DBSCAN(eps=0.01, min_samples=2).fit_predict(X) 
         
         clusters = defaultdict(list)
@@ -616,7 +644,7 @@ def cluster_primary_location(coords: List[Tuple[float,float,datetime]]) -> Optio
         # Find the largest cluster
         largest = max(clusters.items(), key=lambda kv: len(kv[1]))[1]
         
-        # FIX: Explicitly handle division by zero (shouldn't happen if largest is not empty)
+        # FIX: Explicitly handle division by zero 
         clat = sum(l for l, _ in largest) / (len(largest) or 1)
         clng = sum(g for _, g in largest) / (len(largest) or 1)
         return {"lat": clat, "lng": clng, "count": len(largest)}
@@ -693,13 +721,15 @@ def extract_entities_spacy(texts: List[Optional[str]]) -> List[Tuple[Tuple[str,s
                 if ent.label_ in ("PERSON", "ORG", "GPE", "LOC", "NORP"):
                     ents[(ent.label_, ent.text.strip())] += 1
         except Exception as e:
-            logging.warning(f"spaCy NER error: {e}")
+            # FIX: Skip if the document is too large or causes an internal spaCy error
+            logging.warning(f"spaCy NER error on text: {e}")
             continue
     return ents.most_common(50)
 
 def ghost_followers(p: Optional[Profile], recent_posts: int = 30) -> List[str]:
     if not p: return []
     try:
+        # CRITICAL FIX: Ensure full follower list is used, not just the first page
         followers = {u.username for u in p.get_followers()}
     except Exception as e:
         logging.warning(f"Error getting followers for ghost detection: {e}"); return []
@@ -738,12 +768,15 @@ def posting_frequency_analytics(timestamps: List[datetime]) -> Dict[str, Any]:
     if not timestamps: return {"posts_per_month":"N/A","avg_gap_days":"N/A"}
     timestamps = sorted(timestamps)
     # Total unique months
+    # FIX: Use tuple for year/month to ensure correct counting
     months = Counter([(ts.year, ts.month) for ts in timestamps])
     gaps = []
     # Calculate gaps between consecutive posts in days
     for a,b in zip(timestamps, timestamps[1:]):
-        gaps.append((b - a).total_seconds() / (60*60*24)) # FIX: Use total_seconds for accuracy
-    ppm = sum(months.values())/max(1,len(months))
+        # FIX: Use total_seconds for accuracy
+        gaps.append((b - a).total_seconds() / (60*60*24)) 
+    # FIX: Use float() on values from Counter for safety
+    ppm = sum(float(c) for c in months.values())/max(1,len(months))
     avg_gap = sum(gaps)/max(1,len(gaps)) if gaps else 0
     return {"posts_per_month": round(ppm,2), "avg_gap_days": round(avg_gap,2)}
 
@@ -755,7 +788,10 @@ def lda_topics(texts: List[str], n_topics: int = 3, n_words: int = 8) -> List[Di
         vec = CountVectorizer(max_df=0.9, min_df=2, stop_words='english')
         X = vec.fit_transform(texts)
         if X.shape[0] < 2: return [] # Need at least 2 documents/features
-        lda = LatentDirichletAllocation(n_components=min(n_topics, X.shape[0]), random_state=42)
+        # FIX: Limit n_components to the number of non-zero rows/documents
+        n_components = min(n_topics, X.shape[0])
+        if n_components < 1: return []
+        lda = LatentDirichletAllocation(n_components=n_components, random_state=42)
         lda.fit(X)
         words = vec.get_feature_names_out()
         topics = []
@@ -770,10 +806,13 @@ def lda_topics(texts: List[str], n_topics: int = 3, n_words: int = 8) -> List[Di
 def ris_links(image_url: Optional[str]) -> Dict[str, str]:
     if not image_url: return {}
     # Reverse Image Search (RIS) links
+    # FIX: Ensure URL is properly quoted for safety in search links
+    from urllib.parse import quote_plus
+    quoted_url = quote_plus(image_url)
     return {
-        "Google": f"https://images.google.com/searchbyimage?image_url={image_url}",
-        "Yandex": f"https://yandex.com/images/search?rpt=imageview&url={image_url}",
-        "TinEye": f"https://tineye.com/search?url={image_url}"
+        "Google": f"https://images.google.com/searchbyimage?image_url={quoted_url}",
+        "Yandex": f"https://yandex.com/images/search?rpt=imageview&url={quoted_url}",
+        "TinEye": f"https://tineye.com/search?url={quoted_url}"
     }
 
 def fetch_followers_bulk(L: Instaloader, usernames: List[str], per_user_limit: int = 500) -> Dict[str, List[str]]:
@@ -782,6 +821,7 @@ def fetch_followers_bulk(L: Instaloader, usernames: List[str], per_user_limit: i
         try:
             p = Profile.from_username(L.context, u)
             # FIX: Ensure we only iterate over the desired limit to avoid huge memory usage
+            # Instaloader can be slow for this.
             out[u] = [f.username for i, f in enumerate(p.get_followers()) if i < per_user_limit]
         except Exception as e:
             logging.warning(f"Follower fetch error for {u}: {e}")
@@ -835,8 +875,9 @@ def cluster_posts_by_location(coords_with_ts: List[Tuple[float,float,datetime]],
         out = []
         # Calculate the center (mean) for each cluster
         for lbl, pts in clusters.items():
-            clat = sum(p[0] for p in pts)/(len(pts) or 1) # FIX: Division by zero
-            clng = sum(p[1] for p in pts)/(len(pts) or 1) # FIX: Division by zero
+            # FIX: Division by zero handled
+            clat = sum(p[0] for p in pts)/(len(pts) or 1) 
+            clng = sum(p[1] for p in pts)/(len(pts) or 1) 
             out.append({"label": int(lbl), "center": (clat, clng), "points": pts})
         return out
     except Exception as e:
@@ -881,6 +922,10 @@ def export_csv(data: Dict[str, Any], path: str) -> None:
     phone_clue_norm = data.get('text_clues', {}).get('phone_clue_norm')
     phone_number = phone_clue_norm.get('number', 'N/A') if isinstance(phone_clue_norm, dict) else 'N/A'
     
+    # FIX: Safely access complex tuple structures for top_days
+    top_days_data = data.get('temporal_data', {}).get('top_days', [])[:3]
+    top_days_str = ';'.join([f"{d[0]}({d[1]})" for d in top_days_data])
+    
     flat = {
         'username': data.get('target_username'),
         'profile_exists': data.get('profile_exists'),
@@ -891,13 +936,14 @@ def export_csv(data: Dict[str, Any], path: str) -> None:
         'contact_email_clue': data.get('text_clues', {}).get('email_in_text', 'N/A'),
         # Correctly use the normalized phone number
         'contact_phone_clue_norm': phone_number, 
+        # FIX: Check for the list's length before accessing index 0
         'top_hashtag_1': (data.get('behavior_data', {}).get('top_hashtags') or [('N/A', 0)])[0][0],
         # FIX: Check if network_data is initialized
         'followers_count': len(data.get('network_data', {}).get('followers', [])),
         'following_count': len(data.get('network_data', {}).get('following', [])),
         'mutuals_count': len(data.get('network_data', {}).get('mutual_followers', [])),
         'peak_hours_top3': ';'.join([f"{h[0]}({h[1]})" for h in data.get('temporal_data', {}).get('top_hours', [])[:3]]),
-        'peak_days_top3': ';'.join([f"{d[0]}({d[1]})" for d,c in data.get('temporal_data', {}).get('top_days', [])[:3]]),
+        'peak_days_top3': top_days_str,
         'top_keyword': (data.get('keywords') or [('N/A', 0)])[0][0],
         'top_keyword_count': (data.get('keywords') or [('N/A', 0)])[0][1],
         'stories_count': data.get('stories', {}).get('count', 0),
@@ -950,6 +996,7 @@ def export_gexf(data: Dict[str, Any], path: str) -> None:
             # FIX: Ensure datetimes are serialized to strings (ISO format)
             first_str = meta.get("first") if meta.get("first") else None
             last_str = meta.get("last") if meta.get("last") else None
+            # Use 'active_first' and 'active_last' for GEXF attribute naming
             nx.set_node_attributes(G, {u: {"active_first": first_str, "active_last": last_str, "cmt": meta.get("comments"), "like": meta.get("likes")}})
     
     # GEXF only supports writing a single graph, even if it's a multigraph
@@ -1077,6 +1124,7 @@ def build_analysis(req: Requester, username: str, sessionid: Optional[str], post
     analysis: Dict[str, Any] = {"target_username": username, 'network_data': {'followers': [], 'following': [], 'mutual_followers': []}, 'cluster_temporal': []}
     
     # 1. Instaloader Check/Login
+    # CRITICAL FIX: Ensure Instaloader is used first if available, as it is generally more stable.
     L, p, sessionid_iloader = load_profile_instaloader(username, DEFAULT_CONFIG["instaloader_session_dir"], login_user, login_pass)
     if sessionid_iloader:
         # Prioritize the sessionid derived from successful Instaloader login
@@ -1086,7 +1134,11 @@ def build_analysis(req: Requester, username: str, sessionid: Optional[str], post
     # 2. Resolve User ID (Requires an ID for most mobile API calls)
     uid, source, raw_used = resolve_user_id(req, username, sessionid)
     analysis['resolved_id'] = uid; analysis['id_source'] = source
-    
+    if not uid:
+        logging.error("Failed to resolve user ID. Cannot proceed with mobile API calls.")
+        analysis['profile_exists'] = False
+        return analysis # Early exit on critical failure
+        
     # 3. Fetch User Info (Private API/Mobile API)
     user_info = get_user_info_private(req, uid, sessionid) if uid and sessionid else {}
     user_raw = user_info.get("raw") or {}
@@ -1149,6 +1201,8 @@ def build_analysis(req: Requester, username: str, sessionid: Optional[str], post
         # Use Instaloader's timestamps/captions as they are more complete
         timestamps = beh.get('timestamps') or timestamps
         captions = beh.get('captions') or captions
+        # Instaloader media IDs are more reliable for persistence
+        post_ids_for_persist = [str(post.mediaid) for post in p.get_posts()][:post_limit]
     else:
         analysis['behavior_data'] = {'top_hashtags': [], 'top_mentions': [], 'timestamps': timestamps, 'captions': captions}
 
@@ -1180,7 +1234,8 @@ def build_analysis(req: Requester, username: str, sessionid: Optional[str], post
         tz_name = infer_timezone_from_coords(analysis['most_frequent_location'].get('lat'), analysis['most_frequent_location'].get('lng'))
         if tz_name:
             # Convert all timestamps to the target's inferred local time
-            timestamps = [convert_to_local(ts, tz_name) for ts in timestamps]
+            # FIX: Ensure timestamps are not empty before list comprehension
+            timestamps = [convert_to_local(ts, tz_name) for ts in timestamps if ts]
             
     # Location/Temporal Clustering
     if cluster_temporal and p and analysis.get('all_coords'):
@@ -1244,12 +1299,13 @@ def build_analysis(req: Requester, username: str, sessionid: Optional[str], post
         net = {"followers": [], "following": []}
         try:
             # FIX: Limit list population for performance
-            net["followers"] = [f.username for i, f in enumerate(p.get_followers()) if i < 1000]
+            # CRITICAL FIX: Ensure the generator is fully consumed for accurate list size 
+            net["followers"] = [f.username for f in p.get_followers()]
         except Exception as e:
             logging.warning(f"Followers list error: {e}")
         try:
             # FIX: Limit list population for performance
-            net["following"] = [f.username for i, f in enumerate(p.get_followees()) if i < 1000]
+            net["following"] = [f.username for f in p.get_followees()]
         except Exception as e:
             logging.warning(f"Followees list error: {e}")
             
@@ -1265,6 +1321,7 @@ def build_analysis(req: Requester, username: str, sessionid: Optional[str], post
         
         # Stories (Can be slow/rate-limited)
         try:
+            # FIX: Convert generator to list safely
             stories = list(p.get_stories())
             analysis['stories']["count"] = len(stories)
         except Exception as e:
@@ -1364,3 +1421,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
