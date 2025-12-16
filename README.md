@@ -6,9 +6,20 @@ Requirements:
 
 
 ```
-pip install instaloader Pillow textblob phonenumbers pycountry networkx spacy timezonefinder scikit-learn pytz reportlab
+pkg update && pkg upgrade
+# General build tools and Python development headers
+pkg install clang make python libjpeg-turbo libpng zlib openssl git
+```
+```
+pip install instaloader Pillow phonenumbers pycountry networkx
+pip install scikit-learn numpy scipy # Required for sklearn and its dependencies
+pip install spacy textblob pytz timezonefinder reportlab
+
+# Download the required spaCy model
 python -m spacy download en_core_web_sm
 
+# Download the required nltk data
+python -c "import nltk; nltk.download('stopwords')"
 ```
 
 
@@ -53,7 +64,20 @@ or
 ```
 python3 ./APITrace.py
 ```
+Advanced Runs:
 
+```
+# Basic run with Instaloader login (recommended for best results)
+python3 InstaOSNIT.py -t <TARGET_USERNAME> --login-user <YOUR_IG_USER> --login-pass <YOUR_IG_PASS> --output <TARGET_USERNAME>_deep.json --format json
+```
+```
+# Run with an existing sessionid (for API access without Instaloader login)
+python3 InstaOSNIT.py -t <TARGET_USERNAME> -s <YOUR_SESSION_ID>
+```
+```
+# Run with deep network analysis and temporal clustering, exporting to GEXF
+python3 InstaOSNIT.py -t <TARGET_USERNAME> --login-user <USER> --login-pass <PASS> --deep-network --cluster-temporal -f gexf
+```
 
 Updating:
 
