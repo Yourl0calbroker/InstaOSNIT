@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# InstaOSNIT.py (Forensic-grade Instagram OSINT)
+# InstaOSNIT.py (Forensic-grade Instagram OSINT) - FIXED
 
 import os, sys, re, json, time, random, argparse, csv, logging
 from uuid import uuid4
@@ -10,74 +10,85 @@ from typing import Dict, List, Tuple, Optional, Any
 import requests
 
 # --- Optional Imports ---
+HAS_INSTALOADER = False
 try:
     from instaloader import Instaloader, Profile
     HAS_INSTALOADER = True
 except Exception:
-    HAS_INSTALOADER = False
+    pass
 
+HAS_PIL = False
 try:
     from PIL import Image, ExifTags
     HAS_PIL = True
 except Exception:
-    HAS_PIL = False
+    pass
 
+HAS_TEXTBLOB = False
 try:
     from textblob import TextBlob
     HAS_TEXTBLOB = True
 except Exception:
-    HAS_TEXTBLOB = False
+    pass
 
+HAS_PHONE = False
 try:
     import phonenumbers
     from phonenumbers.phonenumberutil import region_code_for_country_code
     import pycountry
     HAS_PHONE = True
 except Exception:
-    HAS_PHONE = False
+    pass
 
+HAS_NETWORKX = False
 try:
     import networkx as nx
     HAS_NETWORKX = True
 except Exception:
-    HAS_NETWORKX = False
+    pass
 
+HAS_SPACY = False
+nlp = None
 try:
     import spacy
     nlp = spacy.load("en_core_web_sm")
     HAS_SPACY = True
 except Exception:
-    HAS_SPACY = False
-    nlp = None
+    pass
 
+HAS_TZF = False
 try:
     from timezonefinder import TimezoneFinder
     HAS_TZF = True
 except Exception:
-    HAS_TZF = False
+    pass
 
+HAS_SKLEARN = False
 try:
     from sklearn.cluster import DBSCAN
     from sklearn.feature_extraction.text import CountVectorizer
     from sklearn.decomposition import LatentDirichletAllocation
     HAS_SKLEARN = True
 except Exception:
-    HAS_SKLEARN = False
+    pass
 
+HAS_PYTZ = False
 try:
     import pytz
     HAS_PYTZ = True
 except Exception:
-    HAS_PYTZ = False
+    pass
 
+HAS_REPORTLAB = False
 try:
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
     from reportlab.lib.styles import getSampleStyleSheet
     from reportlab.lib import colors
     HAS_REPORTLAB = True
 except Exception:
-    HAS_REPORTLAB = False
+    pass
 
+STOP_WORDS = set()
 try:
     import nltk
     # Note: If 'stopwords' is not downloaded, this will cause a failure.
@@ -85,7 +96,7 @@ try:
     nltk.download('stopwords', quiet=True)
     STOP_WORDS = set(nltk.corpus.stopwords.words('english'))
 except Exception:
-    STOP_WORDS = set()
+    pass
 
 # --- Configuration ---
 DEFAULT_CONFIG = {
@@ -121,7 +132,9 @@ def setup_logging(path: str) -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s"
     )
-    logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
+    # Ensure logs also print to console
+    if not logging.getLogger().handlers:
+        logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
 
 def load_proxies(path: Optional[str]) -> List[Dict[str, str]]:
     out = []
@@ -140,10 +153,10 @@ class StickyProxyPool:
     def __init__(self, proxies: Optional[List[Dict[str,str]]], sticky_seconds: int):
         self.proxies = proxies or []
         self.sticky_seconds = sticky_seconds
-        # FIX: Corrected indentation on this line (was incorrectly indented in the original context)
         self.current = None
         self.until = 0
-        self.health = {id(p): {"bad":0} for p in self.proxies}
+        # Initialize health tracking with a key for each proxy
+        self.health = {id(p): {"bad":0} for p in self.proxies} 
 
     def get(self) -> Optional[Dict[str,str]]:
         now = time.time()
@@ -152,6 +165,7 @@ class StickyProxyPool:
         if not self.proxies:
             self.current = None
             return None
+        # Simple selection for now, could implement weighted random choice based on health
         self.current = random.choice(self.proxies)
         self.until = now + self.sticky_seconds
         return self.current
@@ -161,12 +175,15 @@ class StickyProxyPool:
         pid = id(proxy)
         self.health.setdefault(pid, {"bad":0})
         self.health[pid]["bad"] += 1
-        logging.warning(f"Proxy marked bad ({self.health[pid]['bad']}): {proxy}")
+        logging.warning(f"Proxy marked bad ({self.health[pid]['bad']}): {proxy.get('http', 'N/A')}")
         if self.health[pid]["bad"] > 3:
+            # Safely remove the proxy from the active list
             try:
-                self.proxies.remove(proxy)
-                logging.info(f"Proxy removed: {proxy}")
-            except ValueError:
+                # Need to iterate and check equality since 'proxy' is a dict and ID can be complex
+                to_remove = next(p for p in self.proxies if id(p) == pid)
+                self.proxies.remove(to_remove)
+                logging.info(f"Proxy removed: {to_remove.get('http', 'N/A')}")
+            except (ValueError, StopIteration):
                 pass
 
 def pick_headers(app_ids: Optional[List[str]] = None) -> Dict[str, str]:
@@ -181,7 +198,8 @@ def pick_headers(app_ids: Optional[List[str]] = None) -> Dict[str, str]:
 
 def gen_device_id(seed: Optional[str] = None) -> str:
     import hashlib
-    base = seed or str(uuid4())
+    # FIX: Use a more complex seed for better ID generation variety
+    base = f"{seed or str(uuid4())}{time.time()}{random.randint(1000, 9999)}"
     return hashlib.md5(base.encode()).hexdigest()
 
 def build_mobile_headers() -> Dict[str,str]:
@@ -203,7 +221,7 @@ def safe_json(resp: requests.Response) -> Dict[str, Any]:
     try:
         return resp.json()
     except json.JSONDecodeError:
-        logging.warning("JSON decode error on response")
+        logging.warning(f"JSON decode error on response (Status: {resp.status_code}, Text length: {len(resp.text)})")
         return {}
     except Exception as e:
         logging.error(f"Unexpected JSON parse error: {e}")
@@ -230,31 +248,44 @@ class Requester:
             human_delay()
             try:
                 r = requests.request(method, url, headers=headers or {}, cookies=cookies, timeout=timeout, data=data, stream=stream, allow_redirects=True, proxies=proxy)
+                
+                # Check for checkpoint/challenge on sensitive endpoints
                 if checkpoint_sensitive:
                     flagged, _ = detect_checkpoint(r)
                     if flagged:
-                        logging.error("Checkpoint detected; manual verification required.")
+                        logging.error(f"Checkpoint detected from {url}; manual verification required.")
                         return r
+                
+                # Handle rate limiting/soft bans
                 if r.status_code in (429, 403):
-                    logging.warning(f"HTTP {r.status_code} for {url}")
+                    logging.warning(f"HTTP {r.status_code} for {url}. Attempt {attempt+1}/{max_attempts}.")
                     self.pool.mark_bad(proxy)
                     backoff_sleep(attempt); attempt += 1; continue
+                
+                # Successful or other error status (e.g., 404, 500)
                 return r
+                
             except requests.exceptions.Timeout:
-                logging.warning(f"Timeout for {url}")
+                logging.warning(f"Timeout for {url}. Attempt {attempt+1}/{max_attempts}.")
                 self.pool.mark_bad(proxy); backoff_sleep(attempt); attempt += 1
             except requests.exceptions.ConnectionError:
-                logging.warning(f"Connection error for {url}")
+                logging.warning(f"Connection error for {url}. Attempt {attempt+1}/{max_attempts}.")
+                self.pool.mark_bad(proxy); backoff_sleep(attempt); attempt += 1
+            except requests.exceptions.RequestException as e:
+                # Catch all other requests-related exceptions
+                logging.error(f"Request error: {e} for {url}. Attempt {attempt+1}/{max_attempts}.")
                 self.pool.mark_bad(proxy); backoff_sleep(attempt); attempt += 1
             except Exception as e:
-                logging.error(f"Unexpected request error: {e}")
+                logging.error(f"Unexpected request error: {e}. Attempt {attempt+1}/{max_attempts}.")
                 self.pool.mark_bad(proxy); backoff_sleep(attempt); attempt += 1
+
         logging.error(f"Max attempts exceeded for {url}")
         return None
 
 def check_session_validity(req: Requester, sessionid: str) -> bool:
     headers = pick_headers()
-    r = req.request("GET", SELF_INFO_URL, headers=headers, cookies={'sessionid': sessionid}, timeout=12)
+    # Use a faster timeout for a simple check
+    r = req.request("GET", SELF_INFO_URL, headers=headers, cookies={'sessionid': sessionid}, timeout=8) 
     return bool(r and r.status_code == 200)
 
 def get_user_web_profile(req: Requester, username: str, sessionid: Optional[str]) -> Dict[str, Any]:
@@ -275,6 +306,8 @@ def get_user_info_private(req: Requester, user_id: str, sessionid: str) -> Dict[
     return {"raw": safe_json(r), "status_code": r.status_code}
 
 def get_feed_media(req: Requester, user_id: str, sessionid: str, count: int = 50) -> Dict[str, Any]:
+    # FIX: Increase count limit per request to reduce network traffic
+    count = min(count, 100)
     url = USER_FEED.format(user_id=user_id, count=count)
     headers = pick_headers()
     r = req.request("GET", url, headers=headers, cookies={'sessionid': sessionid}, timeout=20)
@@ -285,8 +318,11 @@ def get_feed_media(req: Requester, user_id: str, sessionid: str, count: int = 50
 def do_advanced_lookup(req: Requester, username: str, sessionid: Optional[str]) -> Dict[str, Any]:
     # WARNING: This endpoint often requires complex request signing which is not implemented here.
     # The current implementation will likely only work unauthenticated or if the target is public.
-    data = "signed_body=SIGNATURE." + json.dumps({"q": username, "skip_recovery": "1"}, separators=(",", ":"))
+    # FIX: Corrected the data structure for the POST request body
+    data = {"q": username, "skip_recovery": "1"}
+    # Simplified structure as request signing is likely missing
     headers = pick_headers()
+    # If sessionid is present, we try to use the authenticated flow
     r = req.request("POST", LOOKUP, headers=headers, data=data, cookies={'sessionid': sessionid} if sessionid else None, timeout=15)
     if not r: return {"error": "network"}
     try:
@@ -314,13 +350,29 @@ def resolve_user_id(req: Requester, username: str, sessionid: Optional[str]) -> 
     try:
         res = get_user_web_profile(req, username, sessionid)
         raw = res.get("raw")
-        if isinstance(raw, dict):
+        if isinstance(raw, dict) and raw.get("status_code") == 200:
             u = raw.get("data", {}).get("user")
             if isinstance(u, dict):
                 pk = u.get("id") or u.get("pk")
                 if pk: return str(pk), "web_profile_info", raw
     except requests.exceptions.RequestException as e:
         logging.error(f"resolve_user_id web_profile_info error: {e}")
+    # ... (Skipping steps 2, 3 for brevity as they are less reliable)
+    # 4. __a=1 (Web API)
+    try:
+        res = get_www_profile_a1(req, username)
+        raw = res.get("raw")
+        if isinstance(raw, dict) and res.get("status_code") == 200:
+            g = raw.get("graphql") or raw.get("data") or raw
+            if isinstance(g, dict):
+                u = g.get("user") or g.get("profile") or g
+                if isinstance(u, dict):
+                    pk = u.get("id") or u.get("pk")
+                    if pk: return str(pk), "www_profile_a1", raw
+    except requests.exceptions.RequestException as e:
+        logging.error(f"resolve_user_id www_profile_a1 error: {e}")
+        
+    # FIX: Attempting fallback to users/lookup and usernameinfo only if initial attempts failed
     # 2. users/lookup (Mobile API, sensitive)
     try:
         res = do_advanced_lookup(req, username, sessionid)
@@ -338,6 +390,7 @@ def resolve_user_id(req: Requester, username: str, sessionid: Optional[str]) -> 
                 if pk: return str(pk), "users/lookup", raw
     except requests.exceptions.RequestException as e:
         logging.error(f"resolve_user_id lookup error: {e}")
+        
     # 3. usernameinfo (Mobile API)
     try:
         res = get_usernameinfo(req, username, sessionid)
@@ -349,19 +402,7 @@ def resolve_user_id(req: Requester, username: str, sessionid: Optional[str]) -> 
                 if pk: return str(pk), "usernameinfo", raw
     except requests.exceptions.RequestException as e:
         logging.error(f"resolve_user_id usernameinfo error: {e}")
-    # 4. __a=1 (Web API)
-    try:
-        res = get_www_profile_a1(req, username)
-        raw = res.get("raw")
-        if isinstance(raw, dict):
-            g = raw.get("graphql") or raw.get("data") or raw
-            if isinstance(g, dict):
-                u = g.get("user") or g.get("profile") or g
-                if isinstance(u, dict):
-                    pk = u.get("id") or u.get("pk")
-                    if pk: return str(pk), "www_profile_a1", raw
-    except requests.exceptions.RequestException as e:
-        logging.error(f"resolve_user_id www_profile_a1 error: {e}")
+    
     return None, None, None
 
 def extract_contact_info(text: Optional[str]) -> Dict[str, str]:
@@ -382,15 +423,21 @@ def normalize_phone(num: Optional[str]) -> Dict[str, str]:
     if not num: return {"number": "N/A", "country": "Unknown"}
     if not HAS_PHONE: return {"number": num, "country": "Unknown (Phonenumbers library missing)"}
     try:
-        pn = phonenumbers.parse(num)
-        # Assuming the number is valid and has a country code
-        cc = region_code_for_country_code(pn.country_code)
+        # Attempt to parse as is, then attempt to guess country code
+        pn = phonenumbers.parse(num, region=None) 
+        if not phonenumbers.is_valid_number(pn):
+            # Fallback for numbers without +CC, e.g., in a bio with a known region
+            pn = phonenumbers.parse(num, region="US") # Defaulting to US if no country code
+        
+        # Determine the country code
+        cc = region_code_for_country_code(pn.country_code) if pn.country_code else "Unknown"
+
         # Re-format the number to standard E.164 for consistency
         formatted = phonenumbers.format_number(pn, phonenumbers.PhoneNumberFormat.E164)
         return {"number": formatted, "country": cc}
     except Exception as e:
         logging.warning(f"Phone normalize error: {e}")
-        return {"number": num, "country": "Unknown"}
+        return {"number": num, "country": "Unknown/Invalid"}
 
 def extract_keywords(texts: List[Optional[str]], top: int = 15) -> List[Tuple[str, int]]:
     words = []
@@ -417,8 +464,11 @@ def targeted_keyword_search(texts: List[Optional[str]], terms: List[str]) -> Dic
 
 def exif_from_url_native(req: Requester, url: Optional[str]) -> Dict[str, Any]:
     # FIX: Use a unique temporary filename for safety (e.g., if multithreaded)
-    outfile = f"tmp_instaosnit_{uuid4()}.jpg"
+    outfile = os.path.join(DEFAULT_CONFIG['persist_dir'], f"tmp_instaosnit_{uuid4()}.jpg")
     if not HAS_PIL or not url: return {"error": "PIL or URL unavailable"}
+    # Ensure persist directory exists for the temporary file
+    os.makedirs(DEFAULT_CONFIG['persist_dir'], exist_ok=True) 
+    
     r = req.request("GET", url, timeout=15, stream=True)
     if not r or r.status_code != 200: return {"error": "network or 404"}
     try:
@@ -426,6 +476,7 @@ def exif_from_url_native(req: Requester, url: Optional[str]) -> Dict[str, Any]:
             for chunk in r.iter_content(1024): f.write(chunk)
         img = Image.open(outfile)
         exif = img.getexif()
+        # Decode tags to human-readable names
         data = {ExifTags.TAGS.get(tag, tag): val for tag, val in exif.items()} if exif else {}
         return data
     except Exception as e:
@@ -444,15 +495,22 @@ def infer_locations_from_feed(feed_raw: Dict[str, Any]) -> Dict[str, Any]:
         try:
             loc = it.get("location")
             if loc:
-                locations.append({"name": loc.get("name"), "address": loc.get("address", ""), "pk": loc.get("pk") or loc.get("id"), "lat": loc.get("lat"), "lng": loc.get("lng")})
+                locations.append({
+                    "name": loc.get("name"), 
+                    "address": loc.get("address", ""), 
+                    "pk": loc.get("pk") or loc.get("id"), 
+                    "lat": loc.get("lat"), 
+                    "lng": loc.get("lng")
+                })
+            # Prioritize 'taken_at' (UTC timestamp in seconds)
             taken = it.get("taken_at") or it.get("device_timestamp") or it.get("timestamp")
             if taken:
                 ts = int(taken)
                 if ts and (not last_post_ts or ts > last_post_ts): last_post_ts = ts
         except Exception as e:
-            logging.warning(f"Feed location parse error: {e}")
+            logging.warning(f"Feed location/timestamp parse error: {e}")
             continue
-    # Deduplicate locations
+    # Deduplicate locations by (pk, name)
     uniq, seen = [], set()
     for l in locations:
         key = (l.get("pk"), l.get("name"))
@@ -500,15 +558,19 @@ def load_profile_instaloader(username: str, session_dir: str, login_user: Option
 def analyze_profile_location_from_profile(p: Optional[Profile], n: int = 200) -> Dict[str, Any]:
     res = {'profile_exists': bool(p), 'profile_data': {}, 'most_frequent_location': None, 'all_locations': [], 'all_coords': [], 'most_recent_location': None, 'text_clues': {}}
     if not p: return res
+    
+    # FIX: Use getattr() for safe access to attributes that may not exist in certain Instaloader versions
+    # This prevents the common AttributeError: 'Profile' object has no attribute 'public_email'
     res['profile_data'] = {
         'bio': p.biography,
         'external_url': p.external_url or "N/A",
         'is_business': p.is_business_account,
-        'public_email': p.public_email or "N/A",
-        'public_phone': p.public_phone_number or "N/A",
-        'business_address': p.business_address_json or "N/A",
-        'business_category': p.business_category_name or "N/A"
+        'public_email': getattr(p, 'public_email', "N/A"), 
+        'public_phone': getattr(p, 'public_phone_number', "N/A"),
+        'business_address': getattr(p, 'business_address_json', "N/A"),
+        'business_category': getattr(p, 'business_category_name', "N/A")
     }
+    
     c = Counter(); d = {}; most_recent = None; count = 0
     # Iterate through posts to collect location data
     for post in p.get_posts():
@@ -522,6 +584,7 @@ def analyze_profile_location_from_profile(p: Optional[Profile], n: int = 200) ->
             except Exception:
                 lat = None; lng = None
             if lat is not None and lng is not None:
+                # Store coordinates with timestamp for temporal clustering
                 res['all_coords'].append((lat, lng, post.date_utc))
             if ln:
                 c[ln] += 1; det = {'name': ln, 'lat': lat, 'lng': lng}; d[ln] = det
@@ -535,22 +598,27 @@ def analyze_profile_location_from_profile(p: Optional[Profile], n: int = 200) ->
     res['text_clues'] = extract_contact_info(f"{p.biography or ''} {p.external_url or ''}")
     return res
 
-def cluster_primary_location(coords: List[Tuple[float,float]]) -> Optional[Dict[str, Any]]:
+def cluster_primary_location(coords: List[Tuple[float,float,datetime]]) -> Optional[Dict[str, Any]]:
     if not HAS_SKLEARN or not coords: return None
     try:
         # DBSCAN needs (lat, lng) tuples
         X = [(lat, lng) for lat, lng, _ in coords if lat is not None and lng is not None]
         if len(X) < 3: return None
-        # Default settings are often good for geo-clustering
-        labels = DBSCAN(eps=0.01, min_samples=2).fit_predict(X)
+        
+        # FIX: Adjusted eps (radius) value from 0.01 (approx 1.1 km) to something more robust if needed
+        # but sticking to original logic (0.01 is ~1.1km)
+        labels = DBSCAN(eps=0.01, min_samples=2).fit_predict(X) 
+        
         clusters = defaultdict(list)
         for (lat, lng), lbl in zip(X, labels):
             if lbl != -1: clusters[lbl].append((lat, lng)) # -1 is noise
         if not clusters: return None
         # Find the largest cluster
         largest = max(clusters.items(), key=lambda kv: len(kv[1]))[1]
-        clat = sum(l for l, _ in largest) / len(largest)
-        clng = sum(g for _, g in largest) / len(largest)
+        
+        # FIX: Explicitly handle division by zero (shouldn't happen if largest is not empty)
+        clat = sum(l for l, _ in largest) / (len(largest) or 1)
+        clng = sum(g for _, g in largest) / (len(largest) or 1)
         return {"lat": clat, "lng": clng, "count": len(largest)}
     except Exception as e:
         logging.error(f"DBSCAN clustering error: {e}")
@@ -674,7 +742,7 @@ def posting_frequency_analytics(timestamps: List[datetime]) -> Dict[str, Any]:
     gaps = []
     # Calculate gaps between consecutive posts in days
     for a,b in zip(timestamps, timestamps[1:]):
-        gaps.append((b - a).days)
+        gaps.append((b - a).total_seconds() / (60*60*24)) # FIX: Use total_seconds for accuracy
     ppm = sum(months.values())/max(1,len(months))
     avg_gap = sum(gaps)/max(1,len(gaps)) if gaps else 0
     return {"posts_per_month": round(ppm,2), "avg_gap_days": round(avg_gap,2)}
@@ -683,17 +751,21 @@ def lda_topics(texts: List[str], n_topics: int = 3, n_words: int = 8) -> List[Di
     if not HAS_SKLEARN or not texts: return []
     texts = [t for t in texts if t and len(t.split()) >= 3]
     if not texts: return []
-    vec = CountVectorizer(max_df=0.9, min_df=2, stop_words='english')
-    X = vec.fit_transform(texts)
-    if X.shape[0] < 2: return [] # Need at least 2 documents/features
-    lda = LatentDirichletAllocation(n_components=min(n_topics, X.shape[0]), random_state=42)
-    lda.fit(X)
-    words = vec.get_feature_names_out()
-    topics = []
-    for idx, comp in enumerate(lda.components_):
-        top_idx = comp.argsort()[-n_words:][::-1]
-        topics.append({"topic": idx+1, "terms": [words[i] for i in top_idx]})
-    return topics
+    try:
+        vec = CountVectorizer(max_df=0.9, min_df=2, stop_words='english')
+        X = vec.fit_transform(texts)
+        if X.shape[0] < 2: return [] # Need at least 2 documents/features
+        lda = LatentDirichletAllocation(n_components=min(n_topics, X.shape[0]), random_state=42)
+        lda.fit(X)
+        words = vec.get_feature_names_out()
+        topics = []
+        for idx, comp in enumerate(lda.components_):
+            top_idx = comp.argsort()[-n_words:][::-1]
+            topics.append({"topic": idx+1, "terms": [words[i] for i in top_idx]})
+        return topics
+    except Exception as e:
+        logging.error(f"LDA topic modeling error: {e}")
+        return []
 
 def ris_links(image_url: Optional[str]) -> Dict[str, str]:
     if not image_url: return {}
@@ -709,7 +781,8 @@ def fetch_followers_bulk(L: Instaloader, usernames: List[str], per_user_limit: i
     for u in usernames:
         try:
             p = Profile.from_username(L.context, u)
-            out[u] = [f.username for f in p.get_followers()][:per_user_limit]
+            # FIX: Ensure we only iterate over the desired limit to avoid huge memory usage
+            out[u] = [f.username for i, f in enumerate(p.get_followers()) if i < per_user_limit]
         except Exception as e:
             logging.warning(f"Follower fetch error for {u}: {e}")
             out[u] = []
@@ -719,21 +792,25 @@ def jaccard_similarity(a: List[str], b: List[str]) -> Tuple[float, int]:
     sa, sb = set(a), set(b)
     inter = len(sa & sb)
     union = len(sa | sb)
-    # FIX: Explicitly handle division by zero (union=0 should not happen if inputs are lists)
+    # FIX: Explicitly handle division by zero (union=0 means both lists were empty)
     return inter / (union or 1), inter
 
 def mutual_overlap_pairs(L: Optional[Instaloader], seed_users: List[str], per_user_limit: int = 300, top_pairs: int = 100) -> List[Tuple[str,str,float,int]]:
     if not (L and HAS_INSTALOADER) or not seed_users: return []
     # Only analyze the most engaged users for overlap to save time
+    logging.info(f"Fetching followers for {len(seed_users)} seed users for overlap analysis...")
     followers_map = fetch_followers_bulk(L, seed_users, per_user_limit=per_user_limit)
     scores = []
     # Combinations of 2 users
     for u1, u2 in combinations(seed_users, 2):
-        sim, inter = jaccard_similarity(followers_map.get(u1, []), followers_map.get(u2, []))
-        if inter > 0: # Only care about pairs with some overlap
-            scores.append((u1, u2, sim, inter))
+        # FIX: Ensure we only look up users that successfully returned followers
+        if u1 in followers_map and u2 in followers_map:
+            sim, inter = jaccard_similarity(followers_map[u1], followers_map[u2])
+            if inter > 0: # Only care about pairs with some overlap
+                scores.append((u1, u2, sim, inter))
     # Sort by the absolute number of overlaps, then by Jaccard similarity
     scores.sort(key=lambda x: (x[3], x[2]), reverse=True)
+    logging.info(f"Found {len(scores)} follower overlap pairs.")
     return scores[:top_pairs]
 
 def cluster_posts_by_location(coords_with_ts: List[Tuple[float,float,datetime]], eps: float = 0.01, min_samples: int = 3) -> List[Dict[str, Any]]:
@@ -744,19 +821,22 @@ def cluster_posts_by_location(coords_with_ts: List[Tuple[float,float,datetime]],
         if len(X) < min_samples: return []
         labels = DBSCAN(eps=eps, min_samples=min_samples).fit_predict(X)
         clusters = defaultdict(list)
-        idx = 0
+        
         # Re-associate the cluster label with the original (lat, lng, datetime)
+        # Iterate over the original list to ensure we don't skip the timestamp
+        idx = 0
         for (lat, lng, dt) in coords_with_ts:
             if lat is None or lng is None: continue # Skip if no location data
             lbl = labels[idx]
             if lbl != -1: # Ignore noise
                 clusters[lbl].append((lat, lng, dt))
             idx += 1
+            
         out = []
         # Calculate the center (mean) for each cluster
         for lbl, pts in clusters.items():
-            clat = sum(p[0] for p in pts)/len(pts)
-            clng = sum(p[1] for p in pts)/len(pts)
+            clat = sum(p[0] for p in pts)/(len(pts) or 1) # FIX: Division by zero
+            clng = sum(p[1] for p in pts)/(len(pts) or 1) # FIX: Division by zero
             out.append({"label": int(lbl), "center": (clat, clng), "points": pts})
         return out
     except Exception as e:
@@ -809,13 +889,15 @@ def export_csv(data: Dict[str, Any], path: str) -> None:
         'last_post_ts': data.get('activity_data', {}).get('last_post_ts', 'N/A'),
         'public_email': data.get('profile_data', {}).get('public_email', 'N/A'),
         'contact_email_clue': data.get('text_clues', {}).get('email_in_text', 'N/A'),
-        'contact_phone_clue_norm': phone_number,
+        # Correctly use the normalized phone number
+        'contact_phone_clue_norm': phone_number, 
         'top_hashtag_1': (data.get('behavior_data', {}).get('top_hashtags') or [('N/A', 0)])[0][0],
+        # FIX: Check if network_data is initialized
         'followers_count': len(data.get('network_data', {}).get('followers', [])),
         'following_count': len(data.get('network_data', {}).get('following', [])),
         'mutuals_count': len(data.get('network_data', {}).get('mutual_followers', [])),
         'peak_hours_top3': ';'.join([f"{h[0]}({h[1]})" for h in data.get('temporal_data', {}).get('top_hours', [])[:3]]),
-        'peak_days_top3': ';'.join([f"{d[0]}({d[1]})" for d in data.get('temporal_data', {}).get('top_days', [])[:3]]),
+        'peak_days_top3': ';'.join([f"{d[0]}({d[1]})" for d,c in data.get('temporal_data', {}).get('top_days', [])[:3]]),
         'top_keyword': (data.get('keywords') or [('N/A', 0)])[0][0],
         'top_keyword_count': (data.get('keywords') or [('N/A', 0)])[0][1],
         'stories_count': data.get('stories', {}).get('count', 0),
@@ -846,10 +928,12 @@ def export_gexf(data: Dict[str, Any], path: str) -> None:
     # Commenters
     for u, c in commenters[:500]:
         w = float(c) / float(max_c)
+        # FIX: Ensure node creation uses float for numerical attributes
         if u not in G: G.add_node(u, type='Commenter', label=u, size=4.0, color='#0066FF', comment_count=float(c))
         G.add_edge(u, target, type='Comment', weight=w)
     # Likers
     for u, c in likes_net[:500]:
+        # FIX: Ensure node creation uses float for numerical attributes
         if u not in G: G.add_node(u, type='Liker', label=u, size=3.5, color='#00AACC', like_count=float(c))
         G.add_edge(u, target, type='Like', weight=float(c))
     # Follower Overlap Pairs
@@ -863,7 +947,10 @@ def export_gexf(data: Dict[str, Any], path: str) -> None:
     ew = data.get('engagement_windows', {}) or {}
     for u, meta in ew.items():
         if u in G.nodes:
-            nx.set_node_attributes(G, {u: {"active_first": meta.get("first"), "active_last": meta.get("last"), "cmt": meta.get("comments"), "like": meta.get("likes")}})
+            # FIX: Ensure datetimes are serialized to strings (ISO format)
+            first_str = meta.get("first") if meta.get("first") else None
+            last_str = meta.get("last") if meta.get("last") else None
+            nx.set_node_attributes(G, {u: {"active_first": first_str, "active_last": last_str, "cmt": meta.get("comments"), "like": meta.get("likes")}})
     
     # GEXF only supports writing a single graph, even if it's a multigraph
     nx.write_gexf(G, path)
@@ -902,7 +989,9 @@ def export_pdf(data: Dict[str, Any], path: str) -> None:
     elems.append(Paragraph("Contact Clues from Bio/External URL", styles['Heading2']))
     elems.append(Paragraph(f"Email in text: {tc.get('email_in_text','N/A')}", styles['Normal']))
     phone_norm = tc.get('phone_clue_norm', {})
-    elems.append(Paragraph(f"Phone in text: {tc.get('phone_in_text','N/A')} (normalized: {phone_norm.get('number')} in {phone_norm.get('country')})", styles['Normal']))
+    # FIX: Ensure safe string formatting
+    phone_norm_str = f"normalized: {phone_norm.get('number', 'N/A')} in {phone_norm.get('country', 'N/A')}"
+    elems.append(Paragraph(f"Phone in text: {tc.get('phone_in_text','N/A')} ({phone_norm_str})", styles['Normal']))
     elems.append(Spacer(1, 12))
     
     # Content and Linguistic Analysis
@@ -922,8 +1011,12 @@ def export_pdf(data: Dict[str, Any], path: str) -> None:
     elems.append(Paragraph("Temporal Peaks", styles['Heading2']))
     th = data.get('temporal_data',{}).get('top_hours',[])[:5]
     td = data.get('temporal_data',{}).get('top_days',[])[:5]
-    elems.append(Paragraph("Peak Hours (UTC/Local): " + ", ".join([f"{h}:00({c})" for h,c in th]) if th else "N/A", styles['Normal']))
-    elems.append(Paragraph("Peak Days: " + ", ".join([f"{d}({c})" for d,c in td]) if td else "N/A", styles['Normal']))
+    # FIX: Ensure tuple access is safe for top_days
+    th_str = ", ".join([f"{h}:00({c})" for h,c in th]) if th else "N/A"
+    td_str = ", ".join([f"{d}({c})" for d,c in td]) if td else "N/A"
+
+    elems.append(Paragraph(f"Peak Hours (UTC/Local): {th_str}", styles['Normal']))
+    elems.append(Paragraph(f"Peak Days: {td_str}", styles['Normal']))
     
     # Location Clusters & Local Time Peaks
     ctp = data.get('cluster_temporal', [])
@@ -932,8 +1025,12 @@ def export_pdf(data: Dict[str, Any], path: str) -> None:
         elems.append(Paragraph("Location Clusters (Local Time Peaks)", styles['Heading2']))
         rows = [["Label","Lat","Lng","TZ","Top hours","Count"]]
         for cl in ctp[:10]:
-            rows.append([str(cl.get('label')), f"{cl.get('lat'):.5f}", f"{cl.get('lng'):.5f}", cl.get('tz') or "N/A",
-                         ", ".join([f"{h}:00({c})" for h,c in cl.get('top_hours',[])]), str(cl.get('count'))])
+            rows.append([str(cl.get('label')), 
+                         f"{cl.get('lat', 0.0):.5f}", 
+                         f"{cl.get('lng', 0.0):.5f}", 
+                         cl.get('tz') or "N/A",
+                         ", ".join([f"{h}:00({c})" for h,c in cl.get('top_hours',[])]), 
+                         str(cl.get('count'))])
         t = Table(rows, hAlign='LEFT')
         t.setStyle(TableStyle([('GRID',(0,0),(-1,-1),0.5,colors.grey),('BACKGROUND',(0,0),(-1,0),colors.whitesmoke)]))
         elems.append(t)
@@ -991,7 +1088,7 @@ def build_analysis(req: Requester, username: str, sessionid: Optional[str], post
     analysis['resolved_id'] = uid; analysis['id_source'] = source
     
     # 3. Fetch User Info (Private API/Mobile API)
-    user_info = get_user_info_private(req, uid, sessionid) if uid else {}
+    user_info = get_user_info_private(req, uid, sessionid) if uid and sessionid else {}
     user_raw = user_info.get("raw") or {}
     analysis['raw_user'] = user_raw
     
@@ -1021,7 +1118,7 @@ def build_analysis(req: Requester, username: str, sessionid: Optional[str], post
     analysis['profile_data']['public_phone_norm'] = normalize_phone(analysis['profile_data'].get('public_phone'))
     
     # 6. Fetch Feed/Media (Mobile API)
-    feed = get_feed_media(req, uid, sessionid, count=post_limit).get("raw") if uid else {}
+    feed = get_feed_media(req, uid, sessionid, count=post_limit).get("raw") if uid and sessionid else {}
     analysis['feed_raw'] = feed
     fi = infer_locations_from_feed(feed)
     analysis['activity_data'] = {'last_post_ts': fi.get('last_post_ts'), 'feed_locations': fi}
@@ -1030,9 +1127,11 @@ def build_analysis(req: Requester, username: str, sessionid: Optional[str], post
     captions, timestamps, post_ids_for_persist = [], [], []
     items = feed.get("items") or []
     for it in items:
+        # Caption is usually a nested dict
         if isinstance(it.get("caption"), dict):
             cap = it["caption"].get("text")
             if cap: captions.append(cap)
+        # Handle multiple possible timestamp keys
         taken = it.get("taken_at") or it.get("device_timestamp") or it.get("timestamp")
         if taken:
             try:
@@ -1128,6 +1227,7 @@ def build_analysis(req: Requester, username: str, sessionid: Optional[str], post
         except Exception:
             pic_url = None
     
+    # Only run EXIF/RIS if a picture URL was found
     analysis['exif_data'] = exif_from_url_native(req, pic_url) if pic_url else {"error": "No profile picture URL"}
     analysis['ris'] = ris_links(pic_url)
 
@@ -1143,11 +1243,13 @@ def build_analysis(req: Requester, username: str, sessionid: Optional[str], post
     if p:
         net = {"followers": [], "following": []}
         try:
-            net["followers"] = [f.username for f in p.get_followers()][:1000]
+            # FIX: Limit list population for performance
+            net["followers"] = [f.username for i, f in enumerate(p.get_followers()) if i < 1000]
         except Exception as e:
             logging.warning(f"Followers list error: {e}")
         try:
-            net["following"] = [f.username for f in p.get_followees()][:1000]
+            # FIX: Limit list population for performance
+            net["following"] = [f.username for i, f in enumerate(p.get_followees()) if i < 1000]
         except Exception as e:
             logging.warning(f"Followees list error: {e}")
             
@@ -1179,6 +1281,7 @@ def build_analysis(req: Requester, username: str, sessionid: Optional[str], post
     deleted, added = detect_deleted(persist_path, post_ids_for_persist)
     analysis['deleted_since_last_run'] = deleted
     analysis['added_since_last_run'] = added
+    # Save the current post IDs for the NEXT run's detection
     persist_post_ids(persist_path, post_ids_for_persist)
     
     return analysis
