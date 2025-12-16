@@ -1,3 +1,11 @@
+Requirements:
+
+```
+pip install instaloader Pillow textblob phonenumbers pycountry networkx spacy timezonefinder scikit-learn pytz reportlab
+python -m spacy download en_core_web_sm
+
+```
+
 Installation:
 
 ```
