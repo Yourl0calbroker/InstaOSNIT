@@ -3,8 +3,13 @@
 (If Dependencies Are Not Already Installed)
 
 Requirements:
+```
+# 1. Update Termux base system and install essential tools
+pkg update && pkg upgrade -y && pkg install -y python python-pip git build-essential libxml2 libxslt libjpeg-turbo nano
 
-
+# 2. Install all required and optional Python dependencies and upgrade them if they exist
+pip install --upgrade requests instaloader Pillow textblob phonenumbers pycountry networkx spacy scikit-learn pytz reportlab nltk
+```
 ```
 pkg update && pkg upgrade
 # General build tools and Python development headers
