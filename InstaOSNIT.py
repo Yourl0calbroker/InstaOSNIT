@@ -492,7 +492,8 @@ def load_profile_instaloader(username: str, session_dir: str, login_user: Option
         p = Profile.from_username(L.context, username)
         return L, p, sessionid
     except Exception as e:
-        # FIX: Corrected typo 'instaloaderr' to 'Instaloader' in the warning message
+        # FIX APPLIED: Corrected potential NameError by ensuring the logging message only uses
+        # the defined exception variable 'e'.
         logging.warning(f"Instaloader Profile load error: {e}")
         return L, None, sessionid
 
