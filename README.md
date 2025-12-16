@@ -26,8 +26,26 @@ python -m spacy download en_core_web_sm
 # Download the required nltk data
 python -c "import nltk; nltk.download('stopwords')"
 ```
+```
+pkg update && pkg upgrade -y
+pkg install -y python python-pip git build-essential libxml2 libxslt libjpeg-turbo nano # Base system tools
+pkg install -y freetype zlib clang # Essential build libraries for Pillow and other dependencies
 
+```
+```
+# This line installs all Python dependencies, including the failed ones
+pip install --upgrade --no-cache-dir requests instaloader Pillow textblob phonenumbers pycountry networkx spacy scikit-learn pytz reportlab nltk
 
+```
+
+```
+# 1. Download spaCy Model (if you get "Module named spacy" error, this is the fix)
+python -m spacy download en_core_web_sm
+
+# 2. Download NLTK data
+python -c "import nltk; nltk.download('stopwords')"
+
+```
 Installation:
 
 
