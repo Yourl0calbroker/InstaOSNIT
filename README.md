@@ -30,6 +30,17 @@ APITrace.py
 ```
 InstaOSNIT.py
 ```
+If That Does Not Work Use:
+```
+cd InstaOSNIT
+```
+```
+python3 ./InstaOSNIT.py
+```
+or
+```
+python3 ./APITrace.py
+```
 
 Updating:
 
