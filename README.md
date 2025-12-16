@@ -1,6 +1,9 @@
 ~250mb Of Space Needed For Full Functionality 
+
 (If Dependencies Are Not Already Installed)
+
 Requirements:
+
 
 ```
 pip install instaloader Pillow textblob phonenumbers pycountry networkx spacy timezonefinder scikit-learn pytz reportlab
@@ -8,7 +11,9 @@ python -m spacy download en_core_web_sm
 
 ```
 
+
 Installation:
+
 
 ```
 
@@ -24,6 +29,7 @@ ln -sf $HOME/InstaOSNIT/InstaOSNIT.py $HOME/bin/InstaOSNIT.py
 
 ```
 
+
 Run The Following Commands To Use:
 
 ```
@@ -32,19 +38,25 @@ APITrace.py
 ```
 InstaOSNIT.py
 ```
+
 If That Does Not Work Use:
+
 ```
 cd InstaOSNIT
 ```
 ```
 python3 ./InstaOSNIT.py
 ```
+
 or
+
 ```
 python3 ./APITrace.py
 ```
 
+
 Updating:
+
 
 ```
 
