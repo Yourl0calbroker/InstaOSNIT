@@ -87,3 +87,33 @@ Updating:
 cd InstaOSNIT && git stash && git pull && git stash pop
 
 ```
+
+
+# 1. Basic, Unauthenticated Scan (Public Data Only)
+```
+python InstaOSNIT.py --target <target_username> --post-limit 50 --format json
+```
+# 2. Authenticated Scan (Recommended for Full Data Access)
+```
+python InstaOSNIT.py --target <target_username> --login-user <your_username> --login-pass <your_password> --post-limit 300 --format json
+```
+# 3. Session ID Scan (API Focus)
+```
+python InstaOSNIT.py --target <target_username> --sessionid <YOUR_SESSION_ID_COOKIE> --post-limit 150 --format json
+```
+# 4. Deep Network & Temporal Clustering (Best Value - Requires Login)
+```
+python InstaOSNIT.py --target <target_username> --login-user <your_username> --login-pass <your_password> --post-limit 500 --deep-network --cluster-temporal --output full_report.json
+```
+# 5. Targeted Keyword Search (Requires Login)
+```
+python InstaOSNIT.py --target <target_username> --login-user <your_username> --login-pass <your_password> --terms "London" "finance|investing" "phone number" --format json
+```
+# 6. GEXF Network Export (for Gephi - Requires Login)
+```
+python InstaOSNIT.py --target <target_username> --login-user <your_username> --login-pass <your_password> --post-limit 100 --format gexf
+```
+# 7. PDF Summary Report (Requires Login)
+```
+python InstaOSNIT.py --target <target_username> --login-user <your_username> --login-pass <your_password> --post-limit 300 --format pdf
+```
