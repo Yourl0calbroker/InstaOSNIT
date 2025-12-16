@@ -1,3 +1,5 @@
+~250mb Of Space Needed For Full Functionality 
+(If Dependencies Are Not Already Installed)
 Requirements:
 
 ```
